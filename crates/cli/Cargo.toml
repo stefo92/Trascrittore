@@ -1,0 +1,17 @@
+[package]
+name = "trascrittore-cli"
+description = "Interfaccia a riga di comando di Trascrittore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "trascrittore-cli"
+path = "src/main.rs"
+
+[dependencies]
+trascrittore-core.workspace = true
+anyhow.workspace = true
+clap = { version = "4.6", features = ["derive"] }

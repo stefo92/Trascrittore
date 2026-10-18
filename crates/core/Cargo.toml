@@ -1,0 +1,36 @@
+[package]
+name = "trascrittore-core"
+description = "Decodifica audio, trascrizione con whisper.cpp ed esportazione dei documenti"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["whisper"]
+# Motore di trascrizione (whisper.cpp). Disattivabile per compilare e testare
+# il resto del nucleo senza CMake/libclang.
+whisper = ["dep:whisper-rs"]
+# Accelerazioni hardware opzionali di whisper.cpp
+cuda = ["whisper", "whisper-rs/cuda"]
+vulkan = ["whisper", "whisper-rs/vulkan"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+whisper-rs = { version = "0.16", optional = true }
+symphonia = { version = "0.6", features = ["all"] }
+rubato = "5.0"
+krilla = "0.8"
+ttf-parser = "0.25"
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+ureq = "3.4"
+directories = "6.0"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
