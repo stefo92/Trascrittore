@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::device::Device;
 use crate::export::ExportFormat;
 
 /// Preferenze persistenti condivise da GUI e CLI.
@@ -20,6 +21,8 @@ pub struct Settings {
     pub language: Option<String>,
     pub translate: bool,
     pub timestamps: bool,
+    /// Processore o scheda video.
+    pub device: Device,
     pub export_format: ExportFormat,
     pub last_audio_dir: Option<PathBuf>,
     pub last_export_dir: Option<PathBuf>,
@@ -35,6 +38,7 @@ impl Default for Settings {
             language: Some("it".to_string()),
             translate: false,
             timestamps: false,
+            device: Device::Auto,
             export_format: ExportFormat::Docx,
             last_audio_dir: None,
             last_export_dir: None,

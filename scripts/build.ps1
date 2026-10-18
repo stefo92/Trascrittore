@@ -11,6 +11,8 @@
     powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build.ps1 test -p trascrittore-core
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release --features trascrittore-core/vulkan
 #>
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -43,6 +45,31 @@ if (-not $env:LIBCLANG_PATH -and (Test-Path (Join-Path $llvmDir "libclang.dll"))
 }
 if (-not $env:LIBCLANG_PATH) {
     Write-Warning "libclang non trovata: installa LLVM con 'winget install LLVM.LLVM'."
+}
+
+# Vulkan SDK (serve solo con --features vulkan): la variabile di sistema può mancare
+# nelle sessioni aperte prima dell'installazione.
+if (-not $env:VULKAN_SDK) {
+    $machine = [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")
+    if ($machine) {
+        $env:VULKAN_SDK = $machine
+    } elseif (Test-Path "C:\VulkanSDK") {
+        $latest = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name | Select-Object -Last 1
+        if ($latest) { $env:VULKAN_SDK = $latest.FullName }
+    }
+}
+if ($env:VULKAN_SDK) {
+    $env:PATH = (Join-Path $env:VULKAN_SDK "Bin") + ";$env:PATH"
+} elseif ($args -match "vulkan") {
+    Write-Warning "Vulkan SDK non trovato: installalo con 'winget install KhronosGroup.VulkanSDK'."
+}
+
+# Con il supporto GPU, i sotto-progetti CMake di ggml creano percorsi oltre i 260 caratteri
+# di Windows se la cartella di build è profonda: si usa una cartella corta, separata da
+# quella della build solo CPU. Si può scegliere un'altra cartella con CARGO_TARGET_DIR.
+if (($args -match "vulkan|cuda") -and -not $env:CARGO_TARGET_DIR) {
+    $env:CARGO_TARGET_DIR = Join-Path $env:SystemDrive "tr-build"
+    Write-Output "Build con GPU: i file compilati vanno in $env:CARGO_TARGET_DIR"
 }
 
 & cargo @args

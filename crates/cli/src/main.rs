@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use trascrittore_core::device::{self, Device};
 use trascrittore_core::document::{Document, DocumentInfo};
 use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::pipeline::{self, Job, Progress, ProgressFn};
 use trascrittore_core::transcriber::{self, TranscribeOptions, Transcriber};
+use trascrittore_core::transcript::format_duration_words;
 use trascrittore_core::{is_cancelled, languages, models};
 
 #[derive(Parser)]
@@ -44,6 +47,9 @@ enum Command {
     /// Elenca le lingue con il loro codice.
     #[command(visible_alias = "languages")]
     Lingue,
+    /// Elenca i dispositivi di calcolo: processore e schede video utilizzabili.
+    #[command(visible_alias = "devices")]
+    Dispositivi,
 }
 
 #[derive(Args)]
@@ -55,6 +61,10 @@ struct TranscribeArgs {
     /// Modello: nome del catalogo (es. small) oppure percorso di un file .bin.
     #[arg(short, long, alias = "model", default_value = models::DEFAULT_MODEL_ID)]
     modello: String,
+
+    /// Dispositivo di calcolo: auto (scheda video se disponibile), cpu, gpu oppure gpu:N.
+    #[arg(short, long, alias = "device", default_value = "auto")]
+    dispositivo: Device,
 
     /// Lingua parlata: codice ISO (es. it, en) oppure «auto» per il rilevamento automatico.
     #[arg(short, long, alias = "language", default_value = "auto")]
@@ -113,6 +123,10 @@ fn main() -> ExitCode {
             println!("auto\tRilevamento automatico");
             Ok(())
         }
+        Command::Dispositivi => {
+            list_devices();
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -133,6 +147,8 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         code if transcriber::is_supported_language(code) => Some(code.to_string()),
         code => bail!("Lingua «{code}» non riconosciuta. Usa il comando «lingue» per l'elenco."),
     };
+    // Verifica subito il dispositivo, prima di eventuali download.
+    args.dispositivo.resolve(device::list_gpus())?;
     let (model_path, model_name) = resolve_model(&args.modello, args.scarica_modello, args.silenzioso)?;
     if let Some(dir) = &args.uscita {
         std::fs::create_dir_all(dir)
@@ -161,15 +177,25 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         let job = Job {
             audio_path: audio_path.clone(),
             model_path: model_path.clone(),
+            device: args.dispositivo,
             options: options.clone(),
         };
+        let started = Instant::now();
         let outcome = pipeline::run(
             &job,
             &mut cache,
             progress_printer(args.silenzioso),
             Arc::clone(&cancel),
         )
-        .and_then(|transcript| {
+        .and_then(|outcome| {
+            if !args.silenzioso {
+                eprintln!(
+                    "Completato in {} su {}.",
+                    format_duration_words(started.elapsed().as_millis() as u64),
+                    outcome.device.label()
+                );
+            }
+            let transcript = outcome.transcript;
             let text = transcript.to_text(args.timestamp);
             if args.stampa {
                 println!("{text}");
@@ -242,8 +268,8 @@ fn progress_printer(quiet: bool) -> ProgressFn {
                     *phase = Phase::Decoding;
                 }
             }
-            Progress::LoadingModel => {
-                eprintln!("Caricamento del modello…");
+            Progress::LoadingModel(device) => {
+                eprintln!("Caricamento del modello su {}…", device.label());
                 *phase = Phase::Loading;
             }
             Progress::Transcribing(percent) => {
@@ -331,6 +357,27 @@ fn download_model(info: &models::ModelInfo, quiet: bool) -> Result<PathBuf> {
     )?;
     eprintln!("Modello salvato in {}", path.display());
     Ok(path)
+}
+
+fn list_devices() {
+    let backends = device::compiled_gpu_backends();
+    println!("cpu\tProcessore (CPU)");
+    for gpu in device::list_gpus() {
+        println!("gpu:{}\t{}", gpu.index, gpu.label());
+    }
+    if backends.is_empty() {
+        println!(
+            "Questa versione non include il supporto per le schede video: ricompila con --features vulkan (AMD, NVIDIA, Intel) o --features cuda (NVIDIA)."
+        );
+    } else if device::list_gpus().is_empty() {
+        println!(
+            "Supporto GPU incluso ({}), ma nessuna scheda video utilizzabile: controlla i driver.",
+            backends.join(", ")
+        );
+    }
+    if let Ok(resolved) = Device::Auto.resolve(device::list_gpus()) {
+        println!("Con «auto» verrà usato: {}.", resolved.label());
+    }
 }
 
 fn list_models() -> Result<()> {

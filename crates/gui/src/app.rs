@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use windows::core::{w, HSTRING, PCWSTR};
@@ -29,10 +30,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use trascrittore_core::device::{self, Device, ResolvedDevice};
 use trascrittore_core::document::{Document, DocumentInfo};
 use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::models::{self, ModelInfo};
-use trascrittore_core::pipeline::{self, Job, Progress, ProgressFn};
+use trascrittore_core::pipeline::{self, Job, Outcome, Progress, ProgressFn};
 use trascrittore_core::settings::Settings;
 use trascrittore_core::transcriber::{self, TranscribeOptions, Transcriber};
 use trascrittore_core::transcript::{format_duration_words, Transcript};
@@ -56,6 +58,7 @@ const IDC_CANCEL: u16 = 110;
 const IDC_TEXT: u16 = 116;
 const IDC_FORMAT: u16 = 118;
 const IDC_EXPORT: u16 = 119;
+const IDC_DEVICE: u16 = 120;
 
 // Identificativi dei comandi di menu.
 const IDM_OPEN: u16 = 201;
@@ -86,7 +89,9 @@ const DEFAULT_FONT_POINTS: u32 = 12;
 
 const HELP_TEXT: &str = "Uso di Trascrittore\n\n\
 1. Premi Ctrl+O (oppure il pulsante Sfoglia) e scegli un file audio.\n\
-2. Scegli modello e lingua. Il modello consigliato è «Large v3 Turbo compresso».\n\
+2. Scegli modello e lingua. Il modello consigliato è «Large v3 Turbo compresso»;\n\
+   i modelli «compressi» più piccoli sono più veloci ma meno precisi.\n\
+   In «Dispositivo» (Alt+P) puoi usare la scheda video, molto più veloce del processore.\n\
 3. Premi F5 per avviare la trascrizione. Esc la annulla.\n\
 4. Al termine il cursore si sposta sul testo trascritto: puoi leggerlo e correggerlo.\n\
 5. Scegli il formato e premi Ctrl+S per esportare.\n\n\
@@ -125,7 +130,7 @@ impl Phase {
 enum WorkerEvent {
     Downloading(u32),
     Pipeline(Progress),
-    Transcribed(Transcript),
+    Transcribed(Outcome),
     DownloadFinished,
     Failed(String),
     Cancelled,
@@ -187,6 +192,8 @@ struct Controls {
     model: HWND,
     lang_label: HWND,
     lang: HWND,
+    device_label: HWND,
+    device: HWND,
     translate: HWND,
     timestamps: HWND,
     start: HWND,
@@ -218,6 +225,7 @@ struct App {
     busy: Cell<bool>,
     phase: Cell<Option<Phase>>,
     last_milestone: Cell<u32>,
+    started: Cell<Option<Instant>>,
     status: RefCell<String>,
     last_focus: Cell<HWND>,
     cancel_flag: RefCell<Arc<AtomicBool>>,
@@ -470,6 +478,8 @@ impl App {
         let model = combo(IDC_MODEL)?;
         let lang_label = label("&Lingua:")?;
         let lang = combo(IDC_LANG)?;
+        let device_label = label("Dis&positivo:")?;
+        let device = combo(IDC_DEVICE)?;
         let translate = button("Traduci in &inglese", IDC_TRANSLATE, BS_AUTOCHECKBOX)?;
         let timestamps = button("Includi time&stamp", IDC_TIMESTAMPS, BS_AUTOCHECKBOX)?;
         let start = button("A&vvia trascrizione", IDC_START, BS_PUSHBUTTON)?;
@@ -516,6 +526,15 @@ impl App {
         annotator.set_name(audio_path, "File audio");
         annotator.set_name(model, "Modello");
         annotator.set_name(lang, "Lingua");
+        annotator.set_name(device, "Dispositivo di calcolo");
+        annotator.set_description(
+            device,
+            if device::compiled_gpu_backends().is_empty() {
+                "Questa versione usa solo il processore: non include il supporto per le schede video."
+            } else {
+                "La scheda video è molto più veloce del processore."
+            },
+        );
         annotator.set_name(progress, "Avanzamento");
         // Il controllo di stato non riceve un nome: per un testo statico il nome è il
         // contenuto stesso, e va letto così com'è.
@@ -546,6 +565,8 @@ impl App {
                 model,
                 lang_label,
                 lang,
+                device_label,
+                device,
                 translate,
                 timestamps,
                 start,
@@ -571,6 +592,7 @@ impl App {
             busy: Cell::new(false),
             phase: Cell::new(None),
             last_milestone: Cell::new(0),
+            started: Cell::new(None),
             status: RefCell::new("Pronto.".to_string()),
             last_focus: Cell::new(browse),
             cancel_flag: RefCell::new(Arc::new(AtomicBool::new(false))),
@@ -580,7 +602,7 @@ impl App {
         })
     }
 
-    fn all_controls(&self) -> [HWND; 20] {
+    fn all_controls(&self) -> [HWND; 22] {
         let c = &self.c;
         [
             c.audio_label,
@@ -590,6 +612,8 @@ impl App {
             c.model,
             c.lang_label,
             c.lang,
+            c.device_label,
+            c.device,
             c.translate,
             c.timestamps,
             c.start,
@@ -623,6 +647,8 @@ impl App {
             .and_then(|code| languages::LANGUAGES.iter().position(|l| l.code == code))
             .map_or(0, |i| i + 1);
         win::combo_select(self.c.lang, lang_index);
+
+        self.fill_device_combo(settings.device);
 
         for format in ExportFormat::ALL {
             win::combo_add(self.c.format, format.label());
@@ -709,6 +735,37 @@ impl App {
             .custom_model_path
             .clone()
             .map(ModelChoice::Custom)
+    }
+
+    /// Voci: «Automatico», «Processore (CPU)», poi una voce per ogni scheda video trovata.
+    fn fill_device_combo(&self, selected: Device) {
+        let gpus = device::list_gpus();
+        let automatic = match Device::Auto.resolve(gpus) {
+            Ok(ResolvedDevice::Gpu(gpu)) => format!("Automatico (ora: {})", gpu.description),
+            _ => "Automatico (ora: processore)".to_string(),
+        };
+        win::combo_reset(self.c.device);
+        win::combo_add(self.c.device, &automatic);
+        win::combo_add(self.c.device, "Processore (CPU)");
+        for gpu in gpus {
+            win::combo_add(self.c.device, &gpu.label());
+        }
+        let index = match selected {
+            Device::Auto => 0,
+            Device::Cpu => 1,
+            Device::Gpu(i) => gpus.iter().position(|g| g.index == i).map_or(0, |p| p + 2),
+        };
+        win::combo_select(self.c.device, index);
+    }
+
+    fn selected_device(&self) -> Device {
+        match win::combo_selected(self.c.device) {
+            Some(1) => Device::Cpu,
+            Some(n) if n >= 2 => device::list_gpus()
+                .get(n - 2)
+                .map_or(Device::Auto, |g| Device::Gpu(g.index)),
+            _ => Device::Auto,
+        }
     }
 
     fn selected_language(&self) -> Option<String> {
@@ -830,6 +887,9 @@ impl App {
             IDC_MODEL if code == CBN_SELCHANGE => self.remember_model_choice(),
             IDC_LANG if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().language = self.selected_language();
+            }
+            IDC_DEVICE if code == CBN_SELCHANGE => {
+                self.settings.borrow_mut().device = self.selected_device();
             }
             IDC_FORMAT if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().export_format = self.selected_format();
@@ -1024,6 +1084,7 @@ impl App {
         let job = Job {
             audio_path,
             model_path,
+            device: self.selected_device(),
             options,
         };
         let model_name = model.display_name();
@@ -1044,7 +1105,7 @@ impl App {
                 Arc::new(move |p| progress_notifier.send(WorkerEvent::Pipeline(p)));
             let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             match pipeline::run(&job, &mut cache, progress, Arc::clone(&cancel)) {
-                Ok(transcript) => notifier.send(WorkerEvent::Transcribed(transcript)),
+                Ok(outcome) => notifier.send(WorkerEvent::Transcribed(outcome)),
                 Err(e) if is_cancelled(&e) => notifier.send(WorkerEvent::Cancelled),
                 Err(e) => notifier.send(WorkerEvent::Failed(format!("{e:#}"))),
             }
@@ -1251,8 +1312,20 @@ impl App {
     }
 
     fn show_about(&self) {
+        let backends = device::compiled_gpu_backends();
+        let gpu_support = if backends.is_empty() {
+            "non incluso in questa versione (solo processore)".to_string()
+        } else {
+            backends.join(", ")
+        };
+        let gpus = device::list_gpus();
+        let gpu_list = if gpus.is_empty() {
+            "nessuna".to_string()
+        } else {
+            gpus.iter().map(|g| g.label()).collect::<Vec<_>>().join("\n")
+        };
         let text = format!(
-            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nCartella dei modelli:\n{}",
+            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n\nCartella dei modelli:\n{}",
             trascrittore_core::APP_NAME,
             trascrittore_core::APP_VERSION,
             transcriber::engine_version(),
@@ -1290,6 +1363,7 @@ impl App {
         self.busy.set(true);
         self.phase.set(None);
         self.last_milestone.set(0);
+        self.started.set(Some(Instant::now()));
         win::send(self.c.progress, PBM_SETPOS, 0, 0);
 
         // Il focus va su «Annulla» prima di disabilitare il pulsante premuto,
@@ -1300,6 +1374,7 @@ impl App {
             self.c.browse,
             self.c.model,
             self.c.lang,
+            self.c.device,
             self.c.translate,
             self.c.timestamps,
             self.c.start,
@@ -1319,6 +1394,7 @@ impl App {
             self.c.browse,
             self.c.model,
             self.c.lang,
+            self.c.device,
             self.c.translate,
             self.c.timestamps,
             self.c.start,
@@ -1373,15 +1449,19 @@ impl App {
                 self.enter_phase(Phase::Decoding);
                 self.show_progress(Phase::Decoding, (fraction * 100.0) as u32);
             }
-            WorkerEvent::Pipeline(Progress::LoadingModel) => {
-                self.enter_phase(Phase::LoadingModel);
+            WorkerEvent::Pipeline(Progress::LoadingModel(device)) => {
+                self.phase.set(Some(Phase::LoadingModel));
                 win::send(self.c.progress, PBM_SETPOS, 0, 0);
+                self.set_status(
+                    &format!("Caricamento del modello su {}…", device.label()),
+                    true,
+                );
             }
             WorkerEvent::Pipeline(Progress::Transcribing(percent)) => {
                 self.enter_phase(Phase::Transcribing);
                 self.show_progress(Phase::Transcribing, percent.max(0) as u32);
             }
-            WorkerEvent::Transcribed(transcript) => self.on_transcribed(transcript),
+            WorkerEvent::Transcribed(outcome) => self.on_transcribed(outcome),
             WorkerEvent::DownloadFinished => {
                 self.fill_model_combo();
                 self.end_busy(self.c.model);
@@ -1423,7 +1503,12 @@ impl App {
         self.set_status(&text, announce);
     }
 
-    fn on_transcribed(&self, transcript: Transcript) {
+    fn on_transcribed(&self, outcome: Outcome) {
+        let Outcome { transcript, device } = outcome;
+        let elapsed = self
+            .started
+            .get()
+            .map(|t| format_duration_words(t.elapsed().as_millis() as u64));
         let timestamps = win::is_checked(self.c.timestamps);
         let text = transcript.to_text(timestamps);
         let words = transcript.word_count();
@@ -1448,6 +1533,9 @@ impl App {
         );
         if let Some(language) = language {
             status.push_str(&format!(", lingua {language}"));
+        }
+        if let Some(elapsed) = elapsed {
+            status.push_str(&format!(". Tempo impiegato: {elapsed} su {}", device.label()));
         }
         status.push('.');
         if words == 0 {
@@ -1572,7 +1660,7 @@ impl App {
         let gap = self.px(8);
         let text_h = self.text_size("Ag").cy.max(self.px(14));
         let ctrl_h = text_h + self.px(10);
-        let label_w = ["File audio:", "Modello:", "Lingua:", "Avanzamento:", "Stato:"]
+        let label_w = ["File audio:", "Modello:", "Lingua:", "Dispositivo:", "Avanzamento:", "Stato:"]
             .iter()
             .map(|l| self.text_size(l).cx)
             .max()
@@ -1602,6 +1690,10 @@ impl App {
 
         place(c.lang_label, margin, label_y(y), label_w - gap, text_h);
         place(c.lang, x1, y, field_w.min(self.px(360)), ctrl_h * 14);
+        y += ctrl_h + gap;
+
+        place(c.device_label, margin, label_y(y), label_w - gap, text_h);
+        place(c.device, x1, y, field_w, ctrl_h * 8);
         y += ctrl_h + gap;
 
         let translate_w = check_w("Traduci in inglese");

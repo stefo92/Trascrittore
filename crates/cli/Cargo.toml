@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "trascrittore-cli"
 path = "src/main.rs"
 
+[features]
+vulkan = ["trascrittore-core/vulkan"]
+cuda = ["trascrittore-core/cuda"]
+
 [dependencies]
 trascrittore-core.workspace = true
 anyhow.workspace = true

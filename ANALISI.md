@@ -27,7 +27,8 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 |---|---|
 | RF-01 | Selezionare un file audio tramite finestra di dialogo di sistema o argomento da riga di comando. |
 | RF-02 | Decodificare i formati audio comuni e convertirli in PCM mono 16 kHz (formato richiesto da Whisper). |
-| RF-03 | Trascrivere con Whisper in locale, scegliendo il modello (tiny, base, small, medium, large-v3-turbo, large-v3, varianti quantizzate) o un file modello personalizzato. |
+| RF-03 | Trascrivere con Whisper in locale, scegliendo il modello (tiny, base, small, medium, large-v3-turbo, large-v3 e le loro varianti compresse, la più leggera di 32 MB) o un file modello personalizzato. |
+| RF-03b | Scegliere il dispositivo di calcolo: automatico, processore (CPU) o una specifica scheda video (AMD, NVIDIA, Intel). |
 | RF-04 | Scegliere la lingua del parlato o lasciarla rilevare automaticamente. |
 | RF-05 | Opzione "Traduci in inglese" (funzione nativa di Whisper). |
 | RF-06 | Mostrare l'avanzamento (percentuale e fase: decodifica, caricamento modello, trascrizione). |
@@ -63,7 +64,8 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 ### 4.3 Prestazioni
 
 - whisper.cpp compilato con ottimizzazioni anche in debug; uso di tutti i core disponibili.
-- Feature opzionali `cuda` e `vulkan` per l'accelerazione GPU.
+- Accelerazione GPU: feature `vulkan` (AMD, NVIDIA e Intel con un'unica build) e `cuda` (solo NVIDIA). Le schede vengono elencate dal registro dei dispositivi di ggml, con lo stesso ordine che usa whisper.cpp; «Automatico» preferisce una scheda dedicata, poi una integrata, poi il processore.
+- Modelli compressi (quantizzati q5): circa un terzo della dimensione, caricamento e calcolo più rapidi.
 - Il modello caricato viene riutilizzato tra trascrizioni successive.
 - Tutte le operazioni lunghe girano su un thread di lavoro: l'interfaccia resta reattiva e lo screen reader non si blocca.
 
@@ -106,6 +108,7 @@ trascrittore/
 |---|---|
 | `audio` | Apertura del contenitore, decodifica di tutte le tracce in PCM, mixaggio in mono, ricampionamento a 16 kHz. |
 | `models` | Catalogo dei modelli ufficiali (nome, file, dimensione), cartella modelli, download con avanzamento e annullamento. |
+| `device` | Elenco delle schede video utilizzabili, scelta «Automatico / CPU / GPU n» e sua risoluzione. |
 | `transcriber` | Caricamento del contesto Whisper, parametri (lingua, traduzione, thread), callback di avanzamento e annullamento, raccolta dei segmenti. |
 | `transcript` | Strutture `Segment`/`Transcript`, formattazione dei timestamp, conversione in testo. |
 | `document` | Modello neutro del documento da esportare. |
@@ -153,6 +156,7 @@ Menu: File | Trascrizione | Aiuto
 File a̲udio:            [percorso (sola lettura)     ] [Sfog̲lia…]
 M̲odello:               [large-v3-turbo-q5_0 (scaricato) ▼]
 L̲ingua:                [Rilevamento automatico ▼]
+Disp̲ositivo:           [Automatico (ora: AMD Radeon RX 6800 XT) ▼]
 [ ] Traduci in i̲nglese     [x] Includi times̲tamp
 [Av̲via trascrizione]   [An̲nulla]
 Avanzamento:           [██████████░░░░░░░░ 54%]
@@ -199,7 +203,7 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 ## 9. Gestione dei modelli
 
 - Cartella predefinita: `%LOCALAPPDATA%\Trascrittore\data\models` (equivalenti su Linux/macOS), modificabile con `TRASCRITTORE_MODELS_DIR`.
-- Catalogo: tiny (78 MB), base (148 MB), small (488 MB), medium (1,5 GB), large-v3-turbo-q5_0 (574 MB, **predefinito**: ottimo compromesso qualità/velocità), large-v3-turbo (1,6 GB), large-v3 (3,1 GB).
+- Catalogo: tiny-q5_1 (32 MB, il più leggero), tiny (78 MB), base-q5_1 (60 MB), base (148 MB), small-q5_1 (190 MB), small (488 MB), medium-q5_0 (539 MB), medium (1,5 GB), large-v3-turbo-q5_0 (574 MB, **predefinito**: ottimo compromesso qualità/velocità), large-v3-turbo (1,6 GB), large-v3 (3,1 GB).
 - Sorgente: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-<nome>.bin`.
 - È sempre possibile scegliere un file `.bin` personalizzato.
 
@@ -223,7 +227,7 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 - Visual Studio Build Tools 2022 con "Sviluppo di applicazioni desktop C++" (compilatore e CMake inclusi).
 - CMake nel `PATH` (va bene quello incluso nei Build Tools).
 - LLVM (`winget install LLVM.LLVM`): whisper-rs genera i binding C con libclang; quelli inclusi nel crate sono generati per Linux e non sono validi su Windows.
-- Facoltativi: CUDA Toolkit (`--features cuda`) o Vulkan SDK (`--features vulkan`).
+- Facoltativi: Vulkan SDK (`--features trascrittore-core/vulkan`, schede AMD/NVIDIA/Intel) o CUDA Toolkit (`--features trascrittore-core/cuda`, solo NVIDIA). Per le build con GPU lo script usa la cartella `C:\tr-build`: i sotto-progetti CMake di ggml (generatore di shader) creano percorsi oltre il limite di 260 caratteri di Windows se la cartella di build è profonda.
 
 ## 13. Piano di sviluppo
 

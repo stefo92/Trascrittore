@@ -12,6 +12,10 @@ build = "build.rs"
 name = "trascrittore"
 path = "src/main.rs"
 
+[features]
+vulkan = ["trascrittore-core/vulkan"]
+cuda = ["trascrittore-core/cuda"]
+
 [dependencies]
 trascrittore-core.workspace = true
 anyhow.workspace = true

@@ -12,9 +12,10 @@ default = ["whisper"]
 # Motore di trascrizione (whisper.cpp). Disattivabile per compilare e testare
 # il resto del nucleo senza CMake/libclang.
 whisper = ["dep:whisper-rs"]
-# Accelerazioni hardware opzionali di whisper.cpp
-cuda = ["whisper", "whisper-rs/cuda"]
+# Schede video. Vulkan funziona con AMD, NVIDIA e Intel (richiede il Vulkan SDK per compilare);
+# CUDA solo con NVIDIA (richiede il CUDA Toolkit).
 vulkan = ["whisper", "whisper-rs/vulkan"]
+cuda = ["whisper", "whisper-rs/cuda"]
 
 [dependencies]
 anyhow.workspace = true
@@ -22,7 +23,8 @@ thiserror.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-whisper-rs = { version = "0.16", optional = true }
+# `raw-api` espone il registro dei dispositivi di ggml, usato per elencare le schede video.
+whisper-rs = { version = "0.16", optional = true, features = ["raw-api"] }
 symphonia = { version = "0.6", features = ["all"] }
 rubato = "5.0"
 krilla = "0.8"

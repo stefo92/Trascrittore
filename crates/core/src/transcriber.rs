@@ -8,6 +8,7 @@ use std::sync::{Arc, Once};
 use anyhow::{anyhow, Result};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::device::ResolvedDevice;
 use crate::transcript::{Segment, Transcript};
 use crate::Cancelled;
 
@@ -28,34 +29,52 @@ pub struct TranscribeOptions {
 pub struct Transcriber {
     context: WhisperContext,
     model_path: PathBuf,
+    device: ResolvedDevice,
 }
 
 static LOGGING: Once = Once::new();
 
+/// Scarta i messaggi di whisper.cpp e ggml invece di stamparli su stderr
+/// (senza un backend di log configurato non vengono mostrati da nessuna parte).
+pub fn silence_engine_logs() {
+    LOGGING.call_once(whisper_rs::install_logging_hooks);
+}
+
 impl Transcriber {
-    /// Carica un modello GGML.
-    pub fn load(model_path: &Path) -> Result<Self> {
-        // Senza un backend di log, i messaggi di whisper.cpp/ggml vengono scartati
-        // invece di finire su stderr.
-        LOGGING.call_once(whisper_rs::install_logging_hooks);
+    /// Carica un modello GGML sul dispositivo indicato.
+    pub fn load(model_path: &Path, device: &ResolvedDevice) -> Result<Self> {
+        silence_engine_logs();
         crate::models::validate_model_file(model_path)?;
-        let context =
-            WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-                .map_err(|e| {
-                    anyhow!(
-                        "Impossibile caricare il modello «{}»: {e}",
-                        model_path.display()
-                    )
-                })?;
+        let mut params = WhisperContextParameters::default();
+        match device {
+            ResolvedDevice::Cpu => params.use_gpu = false,
+            ResolvedDevice::Gpu(gpu) => {
+                params.use_gpu = true;
+                params.gpu_device = i32::try_from(gpu.index).unwrap_or(0);
+            }
+        }
+        let context = WhisperContext::new_with_params(model_path, params).map_err(|e| {
+            anyhow!(
+                "Impossibile caricare il modello «{}» su {}: {e}",
+                model_path.display(),
+                device.label()
+            )
+        })?;
         Ok(Self {
             context,
             model_path: model_path.to_path_buf(),
+            device: device.clone(),
         })
     }
 
     /// Percorso del modello caricato.
     pub fn model_path(&self) -> &Path {
         &self.model_path
+    }
+
+    /// Dispositivo su cui è caricato il modello.
+    pub fn device(&self) -> &ResolvedDevice {
+        &self.device
     }
 
     /// `true` se il modello supporta più lingue (i modelli `.en` solo l'inglese).

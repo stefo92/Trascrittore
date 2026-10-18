@@ -31,41 +31,64 @@ pub struct ModelInfo {
 pub const DEFAULT_MODEL_ID: &str = "large-v3-turbo-q5_0";
 
 /// Modelli ufficiali, dal più leggero al più accurato.
+///
+/// Le varianti «compresse» (quantizzate q5) occupano circa un terzo dello spazio, si caricano
+/// prima e sono più veloci, con una perdita di qualità minima.
 pub const MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id: "tiny-q5_1",
+        description: "Tiny compresso: il più leggero e veloce, qualità bassa",
+        size_bytes: 32_152_673,
+    },
     ModelInfo {
         id: "tiny",
         description: "Tiny: velocissimo, qualità bassa",
-        size_bytes: 77_700_000,
+        size_bytes: 77_691_713,
+    },
+    ModelInfo {
+        id: "base-q5_1",
+        description: "Base compresso: molto veloce, qualità discreta",
+        size_bytes: 59_707_625,
     },
     ModelInfo {
         id: "base",
         description: "Base: veloce, qualità discreta",
-        size_bytes: 148_000_000,
+        size_bytes: 147_951_465,
+    },
+    ModelInfo {
+        id: "small-q5_1",
+        description: "Small compresso: veloce, buona qualità",
+        size_bytes: 190_085_487,
     },
     ModelInfo {
         id: "small",
         description: "Small: buon equilibrio tra velocità e qualità",
-        size_bytes: 488_000_000,
+        size_bytes: 487_601_967,
+    },
+    ModelInfo {
+        id: "medium-q5_0",
+        description: "Medium compresso: qualità alta",
+        size_bytes: 539_212_467,
     },
     ModelInfo {
         id: "medium",
         description: "Medium: qualità alta, lento",
-        size_bytes: 1_530_000_000,
+        size_bytes: 1_533_763_059,
     },
     ModelInfo {
         id: "large-v3-turbo-q5_0",
         description: "Large v3 Turbo compresso: qualità ottima, consigliato",
-        size_bytes: 574_000_000,
+        size_bytes: 574_041_195,
     },
     ModelInfo {
         id: "large-v3-turbo",
         description: "Large v3 Turbo: qualità ottima",
-        size_bytes: 1_620_000_000,
+        size_bytes: 1_624_555_275,
     },
     ModelInfo {
         id: "large-v3",
         description: "Large v3: qualità massima, molto lento",
-        size_bytes: 3_100_000_000,
+        size_bytes: 3_095_033_483,
     },
 ];
 
@@ -222,6 +245,13 @@ mod tests {
             find("small").unwrap().url(),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
         );
+    }
+
+    #[test]
+    fn lightest_model_comes_first() {
+        let lightest = MODELS.iter().min_by_key(|m| m.size_bytes).unwrap();
+        assert_eq!(lightest.id, MODELS[0].id);
+        assert_eq!(MODELS[0].file_name(), "ggml-tiny-q5_1.bin");
     }
 
     #[test]

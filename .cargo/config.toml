@@ -1,0 +1,7 @@
+[env]
+# Con MSVC il crate `cmake` sostituisce CMAKE_<LINGUAGGIO>_FLAGS_RELEASE togliendo i flag /O:
+# nelle build release whisper.cpp verrebbe compilato senza ottimizzazioni (circa 12 volte
+# più lento sulla CPU). whisper-rs-sys inoltra a CMake le variabili CMAKE_*, e quando sono
+# definite il crate `cmake` non le modifica.
+CMAKE_C_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"

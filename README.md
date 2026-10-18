@@ -10,7 +10,10 @@ L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
 
 - Formati audio: MP3, WAV, FLAC, OGG/Vorbis, M4A/AAC, ALAC, AIFF, CAF, MKV/WebM (decodifica in puro Rust).
 - Trascrizione locale: nessun dato inviato in rete. Solo i modelli vengono scaricati, su richiesta.
-- Scelta del modello (da *tiny* a *large-v3*), della lingua o rilevamento automatico, traduzione in inglese.
+- Scelta del modello (da *tiny compresso*, 32 MB, a *large-v3*), della lingua o rilevamento automatico,
+  traduzione in inglese.
+- Calcolo sul processore (CPU) o sulla scheda video (GPU AMD, NVIDIA o Intel tramite Vulkan;
+  NVIDIA anche tramite CUDA), con scelta automatica.
 - Testo modificabile prima dell'esportazione, con o senza marcature temporali.
 - Documenti esportati accessibili:
   - **PDF taggato conforme a PDF/UA-1** (struttura, lingua, titolo, segnalibri);
@@ -24,7 +27,8 @@ L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
 Avvia `trascrittore.exe` (puoi anche passare un file audio come argomento o usare «Apri con»).
 
 1. **Ctrl+O** (o il pulsante *Sfoglia*) per scegliere il file audio.
-2. Scegli **Modello** (Alt+M) e **Lingua** (Alt+L).
+2. Scegli **Modello** (Alt+M), **Lingua** (Alt+L) e **Dispositivo** (Alt+P): «Automatico» usa la
+   scheda video se c'è, altrimenti il processore; puoi anche scegliere una scheda precisa o la sola CPU.
 3. **F5** avvia la trascrizione. Lo stato viene annunciato dallo screen reader; **F2** lo ripete; **Esc** annulla.
 4. Al termine il cursore si sposta sul **testo trascritto**, che puoi leggere e correggere.
 5. Scegli il **formato** (Alt+O) e premi **Ctrl+S** per esportare.
@@ -50,10 +54,16 @@ trascrittore-cli trascrivi intervista.mp3 --lingua it --formato docx,pdf
 ```
 
 ```bash
-trascrittore-cli trascrivi lezione.m4a -m small -t -f txt,html -o trascrizioni --scarica-modello
+trascrittore-cli trascrivi lezione.m4a -m small-q5_1 -t -f txt,html -o trascrizioni --scarica-modello
 ```
 
-Altri comandi: `trascrittore-cli modelli` (elenco e stato dei modelli), `trascrittore-cli scarica <modello>`,
+```bash
+trascrittore-cli trascrivi riunione.mp3 --dispositivo gpu:0
+```
+
+`--dispositivo` accetta `auto` (predefinito), `cpu`, `gpu` (prima scheda video) o `gpu:N`.
+Altri comandi: `trascrittore-cli dispositivi` (processore e schede video utilizzabili),
+`trascrittore-cli modelli` (elenco e stato dei modelli), `trascrittore-cli scarica <modello>`,
 `trascrittore-cli lingue`, `trascrittore-cli --help`. L'avanzamento è stampato su righe separate,
 così è leggibile anche con uno screen reader nel terminale.
 
@@ -61,13 +71,20 @@ così è leggibile anche con uno screen reader nel terminale.
 
 | Modello | Dimensione | Note |
 |---|---|---|
+| **tiny-q5_1** | 32 MB | il più leggero e veloce, qualità bassa |
 | tiny | 78 MB | velocissimo, qualità bassa |
+| base-q5_1 | 60 MB | molto veloce, qualità discreta |
 | base | 148 MB | veloce |
+| small-q5_1 | 190 MB | veloce, buona qualità |
 | small | 488 MB | buon equilibrio |
+| medium-q5_0 | 539 MB | qualità alta |
 | medium | 1,5 GB | qualità alta, lento |
 | **large-v3-turbo-q5_0** | 574 MB | **predefinito**: qualità ottima, buona velocità |
 | large-v3-turbo | 1,6 GB | qualità ottima |
 | large-v3 | 3,1 GB | qualità massima, molto lento su CPU |
+
+Le versioni «compresse» (quantizzate, suffisso `q5`) occupano circa un terzo dello spazio e sono
+più veloci, con una perdita di qualità minima.
 
 I modelli vengono salvati in `%LOCALAPPDATA%\Trascrittore\data\models` (cartella modificabile con la
 variabile d'ambiente `TRASCRITTORE_MODELS_DIR`). Si può usare anche un file `.bin` personalizzato.
@@ -98,8 +115,27 @@ In alternativa si può usare `cargo build --release` da «Developer PowerShell f
 
 I binari sono `target\release\trascrittore.exe` (GUI) e `target\release\trascrittore-cli.exe`.
 
-Accelerazione GPU opzionale: `cargo build --release --features trascrittore-core/cuda`
-(richiede CUDA Toolkit) oppure `--features trascrittore-core/vulkan` (richiede Vulkan SDK).
+### Supporto per le schede video
+
+La build predefinita usa solo il processore. Per abilitare la scelta della scheda video:
+
+- **Vulkan** (consigliato: schede AMD, NVIDIA e Intel con un'unica build). Richiede il Vulkan SDK
+  per compilare (`winget install KhronosGroup.VulkanSDK`); per l'esecuzione basta il driver della scheda.
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release --features trascrittore-core/vulkan
+```
+
+- **CUDA** (solo NVIDIA, di solito più veloce di Vulkan sulle stesse schede). Richiede il CUDA Toolkit
+  per compilare e le sue librerie per l'esecuzione: `--features trascrittore-core/cuda`.
+
+Con queste feature lo script compila in `C:\tr-build` (i binari sono in `C:\tr-build\release`), perché
+i sotto-progetti CMake di ggml superano il limite di 260 caratteri dei percorsi di Windows se la cartella
+di build è profonda. Per sceglierne un'altra basta impostare `CARGO_TARGET_DIR` con un percorso corto.
+
+La build con Vulkan richiede `vulkan-1.dll`, installata da tutti i driver video recenti; su computer
+che non ce l'hanno va distribuita insieme al programma. Se non viene trovata nessuna scheda video,
+Trascrittore usa il processore.
 
 ## Test
 
@@ -130,12 +166,15 @@ powershell -ExecutionPolicy Bypass -File scripts\verifica-accessibilita.ps1 -Aud
 - In whisper-rs 0.16.0 `FullParams::set_abort_callback_safe` passa a whisper.cpp un puntatore
   interpretato in modo errato (la trascrizione fallisce con «failed to encode»): Trascrittore usa
   al suo posto l'API di basso livello con un proprio trampolino.
+- Con MSVC il crate `cmake` toglie i flag di ottimizzazione dalle build release di whisper.cpp
+  (che risulterebbe circa 12 volte più lento sulla CPU): `.cargo/config.toml` imposta
+  esplicitamente `CMAKE_C_FLAGS_RELEASE` e `CMAKE_CXX_FLAGS_RELEASE`. Non rimuoverlo.
 - La GUI è solo per Windows; nucleo e CLI funzionano anche su Linux e macOS.
 
 ## Struttura
 
 ```
-crates/core   libreria: audio, modelli, trascrizione, documento, esportatori
+crates/core   libreria: audio, modelli, dispositivi, trascrizione, documento, esportatori
 crates/cli    trascrittore-cli
 crates/gui    trascrittore (Win32 nativo, accessibile)
 scripts/      verifica dell'accessibilità e audio di prova
