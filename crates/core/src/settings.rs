@@ -23,6 +23,10 @@ pub struct Settings {
     pub timestamps: bool,
     /// Processore o scheda video.
     pub device: Device,
+    /// Flash Attention (disattivata per impostazione predefinita, vedi `EngineOptions`).
+    pub flash_attention: bool,
+    /// Modalità rapida: decodifica greedy, più veloce sulla GPU ma meno precisa.
+    pub fast_mode: bool,
     pub export_format: ExportFormat,
     pub last_audio_dir: Option<PathBuf>,
     pub last_export_dir: Option<PathBuf>,
@@ -39,6 +43,8 @@ impl Default for Settings {
             translate: false,
             timestamps: false,
             device: Device::Auto,
+            flash_attention: false,
+            fast_mode: false,
             export_format: ExportFormat::Docx,
             last_audio_dir: None,
             last_export_dir: None,

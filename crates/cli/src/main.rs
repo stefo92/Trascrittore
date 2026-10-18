@@ -15,7 +15,7 @@ use trascrittore_core::device::{self, Device};
 use trascrittore_core::document::{Document, DocumentInfo};
 use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::pipeline::{self, Job, Progress, ProgressFn};
-use trascrittore_core::transcriber::{self, TranscribeOptions, Transcriber};
+use trascrittore_core::transcriber::{self, EngineOptions, TranscribeOptions, Transcriber};
 use trascrittore_core::transcript::format_duration_words;
 use trascrittore_core::{is_cancelled, languages, models};
 
@@ -65,6 +65,14 @@ struct TranscribeArgs {
     /// Dispositivo di calcolo: auto (scheda video se disponibile), cpu, gpu oppure gpu:N.
     #[arg(short, long, alias = "device", default_value = "auto")]
     dispositivo: Device,
+
+    /// Modalità rapida: decodifica greedy, più veloce sulla scheda video ma un po' meno precisa.
+    #[arg(long, alias = "fast")]
+    rapida: bool,
+
+    /// Attiva Flash Attention: su alcune schede video accelera, su altre (e sulla CPU) rallenta.
+    #[arg(long, alias = "flash-attn")]
+    flash_attention: bool,
 
     /// Lingua parlata: codice ISO (es. it, en) oppure «auto» per il rilevamento automatico.
     #[arg(short, long, alias = "language", default_value = "auto")]
@@ -160,6 +168,10 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         translate: args.traduci,
         threads: args.thread,
         initial_prompt: args.prompt.clone(),
+        fast: args.rapida,
+    };
+    let engine = EngineOptions {
+        flash_attention: args.flash_attention,
     };
     let mut cache: Option<Transcriber> = None;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -178,6 +190,7 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
             audio_path: audio_path.clone(),
             model_path: model_path.clone(),
             device: args.dispositivo,
+            engine,
             options: options.clone(),
         };
         let started = Instant::now();
@@ -188,6 +201,9 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
             Arc::clone(&cancel),
         )
         .and_then(|outcome| {
+            if let Some(warning) = &outcome.gpu_warning {
+                eprintln!("Attenzione: {warning}");
+            }
             if !args.silenzioso {
                 eprintln!(
                     "Completato in {} su {}.",

@@ -23,13 +23,29 @@ pub struct TranscribeOptions {
     pub threads: Option<usize>,
     /// Testo iniziale che orienta lo stile e il vocabolario (nomi propri, sigle…).
     pub initial_prompt: Option<String>,
+    /// Modalità rapida: ricerca greedy invece della beam search (più veloce, meno precisa).
+    pub fast: bool,
+}
+
+/// Opzioni di caricamento del modello.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EngineOptions {
+    /// Flash Attention. Disattivata per impostazione predefinita: misurata su AMD Radeon
+    /// RX 6800 XT (Vulkan) rallenta del 30% sulla GPU e del 50% sulla CPU, ma su altre schede
+    /// video può accelerare.
+    pub flash_attention: bool,
 }
 
 /// Modello Whisper caricato in memoria, riutilizzabile per più trascrizioni.
 pub struct Transcriber {
     context: WhisperContext,
     model_path: PathBuf,
-    device: ResolvedDevice,
+    /// Dispositivo richiesto.
+    requested: ResolvedDevice,
+    /// Dispositivo effettivamente in uso (la CPU se la scheda video non si è attivata).
+    effective: ResolvedDevice,
+    engine: EngineOptions,
+    gpu_warning: Option<String>,
 }
 
 static LOGGING: Once = Once::new();
@@ -42,15 +58,23 @@ pub fn silence_engine_logs() {
 
 impl Transcriber {
     /// Carica un modello GGML sul dispositivo indicato.
-    pub fn load(model_path: &Path, device: &ResolvedDevice) -> Result<Self> {
+    ///
+    /// Se è richiesta una scheda video, controlla dalla memoria video che il modello vi sia
+    /// stato davvero caricato: whisper.cpp altrimenti ripiega sulla CPU senza segnalarlo.
+    pub fn load(model_path: &Path, device: &ResolvedDevice, engine: EngineOptions) -> Result<Self> {
         silence_engine_logs();
         crate::models::validate_model_file(model_path)?;
+        let model_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+
         let mut params = WhisperContextParameters::default();
+        params.flash_attn = engine.flash_attention;
+        let mut memory_before = None;
         match device {
             ResolvedDevice::Cpu => params.use_gpu = false,
             ResolvedDevice::Gpu(gpu) => {
                 params.use_gpu = true;
                 params.gpu_device = i32::try_from(gpu.index).unwrap_or(0);
+                memory_before = crate::device::memory(gpu.index);
             }
         }
         let context = WhisperContext::new_with_params(model_path, params).map_err(|e| {
@@ -60,10 +84,27 @@ impl Transcriber {
                 device.label()
             )
         })?;
+
+        let mut effective = device.clone();
+        let mut gpu_warning = None;
+        if let ResolvedDevice::Gpu(gpu) = device {
+            let memory_after = crate::device::memory(gpu.index);
+            if !gpu_memory_used(memory_before, memory_after, model_size) {
+                effective = ResolvedDevice::Cpu;
+                gpu_warning = Some(format!(
+                    "La scheda video {} non si è attivata: la trascrizione usa il processore. Controlla i driver della scheda video.",
+                    gpu.description
+                ));
+            }
+        }
+
         Ok(Self {
             context,
             model_path: model_path.to_path_buf(),
-            device: device.clone(),
+            requested: device.clone(),
+            effective,
+            engine,
+            gpu_warning,
         })
     }
 
@@ -72,9 +113,24 @@ impl Transcriber {
         &self.model_path
     }
 
-    /// Dispositivo su cui è caricato il modello.
+    /// Dispositivo richiesto al caricamento.
+    pub fn requested_device(&self) -> &ResolvedDevice {
+        &self.requested
+    }
+
+    /// Dispositivo effettivamente in uso.
     pub fn device(&self) -> &ResolvedDevice {
-        &self.device
+        &self.effective
+    }
+
+    /// Opzioni con cui è stato caricato il modello.
+    pub fn engine_options(&self) -> EngineOptions {
+        self.engine
+    }
+
+    /// Avviso se la scheda video richiesta non è stata usata.
+    pub fn gpu_warning(&self) -> Option<&str> {
+        self.gpu_warning.as_deref()
     }
 
     /// `true` se il modello supporta più lingue (i modelli `.en` solo l'inglese).
@@ -98,10 +154,15 @@ impl Transcriber {
             .create_state()
             .map_err(|e| anyhow!("Impossibile preparare il modello: {e}"))?;
 
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: 5,
-            patience: -1.0,
-        });
+        let strategy = if options.fast {
+            SamplingStrategy::Greedy { best_of: 1 }
+        } else {
+            SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience: -1.0,
+            }
+        };
+        let mut params = FullParams::new(strategy);
         let threads = options.threads.unwrap_or_else(default_threads).max(1);
         params.set_n_threads(i32::try_from(threads).unwrap_or(4));
         params.set_translate(options.translate);
@@ -163,6 +224,22 @@ impl Transcriber {
     }
 }
 
+/// Decide se il caricamento ha occupato memoria video.
+///
+/// `memory` è (libera, totale) in byte. Se il driver non riporta la memoria libera
+/// (libera = totale sia prima sia dopo) non si può verificare e si assume che la GPU sia in uso.
+fn gpu_memory_used(before: Option<(u64, u64)>, after: Option<(u64, u64)>, model_size: u64) -> bool {
+    match (before, after) {
+        (Some((free_before, total)), Some((free_after, _))) => {
+            if free_before == total && free_after == total {
+                return true;
+            }
+            free_before.saturating_sub(free_after) >= model_size / 2
+        }
+        _ => true,
+    }
+}
+
 /// Richiamata da whisper.cpp durante il calcolo: `true` interrompe la trascrizione.
 unsafe extern "C" fn abort_trampoline(data: *mut c_void) -> bool {
     if data.is_null() {
@@ -188,4 +265,23 @@ pub fn default_threads() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, 8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gpu_memory_used;
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn detects_gpu_memory_usage() {
+        let model = GB / 2;
+        // 600 MB occupati: modello caricato sulla scheda video.
+        assert!(gpu_memory_used(Some((10 * GB, 16 * GB)), Some((10 * GB - (600 << 20), 16 * GB)), model));
+        // Nessuna variazione: whisper.cpp è ripiegato sulla CPU.
+        assert!(!gpu_memory_used(Some((10 * GB, 16 * GB)), Some((10 * GB, 16 * GB)), model));
+        // Il driver non riporta la memoria libera: non verificabile.
+        assert!(gpu_memory_used(Some((16 * GB, 16 * GB)), Some((16 * GB, 16 * GB)), model));
+        assert!(gpu_memory_used(None, None, model));
+    }
 }

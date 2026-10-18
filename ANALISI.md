@@ -66,6 +66,9 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 - whisper.cpp compilato con ottimizzazioni anche in debug; uso di tutti i core disponibili.
 - Accelerazione GPU: feature `vulkan` (AMD, NVIDIA e Intel con un'unica build) e `cuda` (solo NVIDIA). Le schede vengono elencate dal registro dei dispositivi di ggml, con lo stesso ordine che usa whisper.cpp; «Automatico» preferisce una scheda dedicata, poi una integrata, poi il processore.
 - Modelli compressi (quantizzati q5): circa un terzo della dimensione, caricamento e calcolo più rapidi.
+- Opzioni attivabili dall'utente: scheda video sì/no e quale scheda, modalità rapida (decodifica greedy invece della beam search a 5), Flash Attention. Valori predefiniti scelti con misure reali (AMD Radeon RX 6800 XT, 2 minuti di audio): GPU 5 s, modalità rapida 3 s, Flash Attention 7 s (più lenta, quindi disattivata); CPU 1 min 27 s.
+- Verifica dell'uso effettivo della GPU: dopo il caricamento del modello si controlla dalla memoria video libera che i pesi siano sulla scheda; altrimenti l'utente viene avvisato e lo stato riporta il processore.
+- Lo script di build include il supporto Vulkan quando il Vulkan SDK è presente e copia i programmi in `dist\`, così non si avvia per errore una versione solo CPU.
 - Il modello caricato viene riutilizzato tra trascrizioni successive.
 - Tutte le operazioni lunghe girano su un thread di lavoro: l'interfaccia resta reattiva e lo screen reader non si blocca.
 

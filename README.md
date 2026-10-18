@@ -27,11 +27,30 @@ L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
 Avvia `trascrittore.exe` (puoi anche passare un file audio come argomento o usare «Apri con»).
 
 1. **Ctrl+O** (o il pulsante *Sfoglia*) per scegliere il file audio.
-2. Scegli **Modello** (Alt+M), **Lingua** (Alt+L) e **Dispositivo** (Alt+P): «Automatico» usa la
-   scheda video se c'è, altrimenti il processore; puoi anche scegliere una scheda precisa o la sola CPU.
-3. **F5** avvia la trascrizione. Lo stato viene annunciato dallo screen reader; **F2** lo ripete; **Esc** annulla.
-4. Al termine il cursore si sposta sul **testo trascritto**, che puoi leggere e correggere.
-5. Scegli il **formato** (Alt+O) e premi **Ctrl+S** per esportare.
+2. Scegli **Modello** (Alt+M) e **Lingua** (Alt+L).
+3. Prestazioni:
+   - **Usa la scheda video (GPU)** (Alt+C) attiva o disattiva la GPU: è molto più veloce del processore;
+   - **Scheda video** (Alt+H) sceglie quale scheda usare, se ce n'è più d'una;
+   - **Modalità rapida** (Alt+P) usa una decodifica più semplice: sulla scheda video è fino a due volte
+     più veloce, con qualche errore in più; sul processore il guadagno è minimo;
+   - **Accelerazione Flash Attention** (menu Trascrizione) è disattivata per impostazione predefinita:
+     su alcune schede video accelera, su altre e sul processore rallenta.
+
+   Tempi misurati per 2 minuti di audio con large-v3-turbo-q5_0 su AMD Radeon RX 6800 XT:
+
+   | Configurazione | Scheda video | Processore |
+   |---|---|---|
+   | Normale | 5 s | 1 min 27 s |
+   | Modalità rapida | 3 s | 1 min 37 s |
+   | Normale con Flash Attention | 7 s | 2 min 10 s |
+
+   Lo stato iniziale (F2) dice se la trascrizione userà la scheda video o il processore. Se la scheda
+   video richiesta non si attiva davvero (Trascrittore lo verifica dalla memoria video), viene mostrato
+   un avviso.
+4. **F5** avvia la trascrizione. Lo stato viene annunciato dallo screen reader; **F2** lo ripete; **Esc** annulla.
+5. Al termine il cursore si sposta sul **testo trascritto**, che puoi leggere e correggere. Lo stato riporta
+   anche il tempo impiegato e il dispositivo usato.
+6. Scegli il **formato** (Alt+O) e premi **Ctrl+S** per esportare.
 
 | Tasto | Azione |
 |---|---|
@@ -61,7 +80,8 @@ trascrittore-cli trascrivi lezione.m4a -m small-q5_1 -t -f txt,html -o trascrizi
 trascrittore-cli trascrivi riunione.mp3 --dispositivo gpu:0
 ```
 
-`--dispositivo` accetta `auto` (predefinito), `cpu`, `gpu` (prima scheda video) o `gpu:N`.
+`--dispositivo` accetta `auto` (predefinito), `cpu`, `gpu` (prima scheda video) o `gpu:N`;
+`--rapida` attiva la modalità rapida; `--flash-attention` attiva Flash Attention.
 Altri comandi: `trascrittore-cli dispositivi` (processore e schede video utilizzabili),
 `trascrittore-cli modelli` (elenco e stato dei modelli), `trascrittore-cli scarica <modello>`,
 `trascrittore-cli lingue`, `trascrittore-cli --help`. L'avanzamento è stampato su righe separate,
@@ -103,35 +123,35 @@ Prerequisiti su Windows:
 winget install LLVM.LLVM
 ```
 
+- Vulkan SDK, per il supporto alle schede video AMD, NVIDIA e Intel:
+
+```bash
+winget install KhronosGroup.VulkanSDK
+```
+
 libclang ha bisogno degli header di MSVC, quindi la compilazione va eseguita nell'ambiente di
-Visual Studio. Lo script `scripts\build.ps1` lo prepara (vcvars64, CMake, LLVM) e poi esegue cargo
-con gli argomenti indicati:
+Visual Studio. Lo script `scripts\build.ps1` lo prepara (vcvars64, CMake, LLVM, Vulkan) e poi esegue
+cargo con gli argomenti indicati:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release
 ```
 
-In alternativa si può usare `cargo build --release` da «Developer PowerShell for VS 2022».
-
-I binari sono `target\release\trascrittore.exe` (GUI) e `target\release\trascrittore-cli.exe`.
+**I programmi pronti vengono copiati in `dist\`** (`dist\trascrittore.exe` e `dist\trascrittore-cli.exe`):
+avvia sempre quelli. Lo script dice anche se la build include il supporto per le schede video.
 
 ### Supporto per le schede video
 
-La build predefinita usa solo il processore. Per abilitare la scelta della scheda video:
+- Se il Vulkan SDK è installato, lo script include **automaticamente** il supporto Vulkan (schede AMD,
+  NVIDIA e Intel con un'unica build); per l'esecuzione basta il driver della scheda. Con `--solo-cpu`
+  si compila la versione che usa solo il processore.
+- **CUDA** (solo NVIDIA, di solito più veloce di Vulkan sulle stesse schede) richiede il CUDA Toolkit per
+  compilare e le sue librerie per l'esecuzione: aggiungi `--features trascrittore-core/cuda`.
 
-- **Vulkan** (consigliato: schede AMD, NVIDIA e Intel con un'unica build). Richiede il Vulkan SDK
-  per compilare (`winget install KhronosGroup.VulkanSDK`); per l'esecuzione basta il driver della scheda.
-
-```bash
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release --features trascrittore-core/vulkan
-```
-
-- **CUDA** (solo NVIDIA, di solito più veloce di Vulkan sulle stesse schede). Richiede il CUDA Toolkit
-  per compilare e le sue librerie per l'esecuzione: `--features trascrittore-core/cuda`.
-
-Con queste feature lo script compila in `C:\tr-build` (i binari sono in `C:\tr-build\release`), perché
-i sotto-progetti CMake di ggml superano il limite di 260 caratteri dei percorsi di Windows se la cartella
-di build è profonda. Per sceglierne un'altra basta impostare `CARGO_TARGET_DIR` con un percorso corto.
+Con il supporto GPU lo script compila in `C:\tr-build`, perché i sotto-progetti CMake di ggml superano il
+limite di 260 caratteri dei percorsi di Windows se la cartella di build è profonda (si può scegliere
+un'altra cartella corta con `CARGO_TARGET_DIR`). Un semplice `cargo build` produce invece la versione
+solo processore: la GUI lo segnala nello stato iniziale e quando si attiva «Usa la scheda video».
 
 La build con Vulkan richiede `vulkan-1.dll`, installata da tutti i driver video recenti; su computer
 che non ce l'hanno va distribuita insieme al programma. Se non viene trovata nessuna scheda video,

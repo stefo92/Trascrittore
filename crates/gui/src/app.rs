@@ -36,7 +36,7 @@ use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::models::{self, ModelInfo};
 use trascrittore_core::pipeline::{self, Job, Outcome, Progress, ProgressFn};
 use trascrittore_core::settings::Settings;
-use trascrittore_core::transcriber::{self, TranscribeOptions, Transcriber};
+use trascrittore_core::transcriber::{self, EngineOptions, TranscribeOptions, Transcriber};
 use trascrittore_core::transcript::{format_duration_words, Transcript};
 use trascrittore_core::{audio, is_cancelled, languages};
 
@@ -59,6 +59,8 @@ const IDC_TEXT: u16 = 116;
 const IDC_FORMAT: u16 = 118;
 const IDC_EXPORT: u16 = 119;
 const IDC_DEVICE: u16 = 120;
+const IDC_USE_GPU: u16 = 121;
+const IDC_FAST: u16 = 122;
 
 // Identificativi dei comandi di menu.
 const IDM_OPEN: u16 = 201;
@@ -70,6 +72,7 @@ const IDM_DOWNLOAD: u16 = 213;
 const IDM_CUSTOM_MODEL: u16 = 214;
 const IDM_MODELS_DIR: u16 = 215;
 const IDM_STATUS: u16 = 216;
+const IDM_FLASH: u16 = 217;
 const IDM_COPY: u16 = 221;
 const IDM_ZOOM_IN: u16 = 222;
 const IDM_ZOOM_OUT: u16 = 223;
@@ -91,7 +94,10 @@ const HELP_TEXT: &str = "Uso di Trascrittore\n\n\
 1. Premi Ctrl+O (oppure il pulsante Sfoglia) e scegli un file audio.\n\
 2. Scegli modello e lingua. Il modello consigliato è «Large v3 Turbo compresso»;\n\
    i modelli «compressi» più piccoli sono più veloci ma meno precisi.\n\
-   In «Dispositivo» (Alt+P) puoi usare la scheda video, molto più veloce del processore.\n\
+   «Usa la scheda video» (Alt+C) attiva o disattiva la GPU, molto più veloce del processore;\n\
+   «Scheda video» (Alt+H) sceglie quale usare. «Modalità rapida» (Alt+P) accelera ancora\n\
+   sulla scheda video, con qualche errore in più. Flash Attention (menu Trascrizione) è\n\
+   disattivata: su alcune schede video accelera, su altre rallenta.\n\
 3. Premi F5 per avviare la trascrizione. Esc la annulla.\n\
 4. Al termine il cursore si sposta sul testo trascritto: puoi leggerlo e correggerlo.\n\
 5. Scegli il formato e premi Ctrl+S per esportare.\n\n\
@@ -192,10 +198,12 @@ struct Controls {
     model: HWND,
     lang_label: HWND,
     lang: HWND,
+    use_gpu: HWND,
     device_label: HWND,
     device: HWND,
     translate: HWND,
     timestamps: HWND,
+    fast: HWND,
     start: HWND,
     cancel: HWND,
     progress_label: HWND,
@@ -226,6 +234,7 @@ struct App {
     phase: Cell<Option<Phase>>,
     last_milestone: Cell<u32>,
     started: Cell<Option<Instant>>,
+    gpu_warning_shown: Cell<bool>,
     status: RefCell<String>,
     last_focus: Cell<HWND>,
     cancel_flag: RefCell<Arc<AtomicBool>>,
@@ -353,6 +362,8 @@ unsafe fn create_menu() -> Result<HMENU> {
     AppendMenuW(job, MF_STRING, IDM_CUSTOM_MODEL as usize, w!("Usa un file &modello personalizzato..."))?;
     AppendMenuW(job, MF_STRING, IDM_MODELS_DIR as usize, w!("Apri la &cartella dei modelli"))?;
     AppendMenuW(job, MF_SEPARATOR, 0, PCWSTR::null())?;
+    AppendMenuW(job, MF_STRING, IDM_FLASH as usize, w!("Accelerazione &Flash Attention"))?;
+    AppendMenuW(job, MF_SEPARATOR, 0, PCWSTR::null())?;
     AppendMenuW(job, MF_STRING, IDM_STATUS as usize, w!("Leggi lo s&tato\tF2"))?;
     AppendMenuW(bar, MF_POPUP, job.0 as usize, w!("&Trascrizione"))?;
 
@@ -478,10 +489,12 @@ impl App {
         let model = combo(IDC_MODEL)?;
         let lang_label = label("&Lingua:")?;
         let lang = combo(IDC_LANG)?;
-        let device_label = label("Dis&positivo:")?;
+        let use_gpu = button("Usa la s&cheda video (GPU)", IDC_USE_GPU, BS_AUTOCHECKBOX)?;
+        let device_label = label("Sc&heda video:")?;
         let device = combo(IDC_DEVICE)?;
         let translate = button("Traduci in &inglese", IDC_TRANSLATE, BS_AUTOCHECKBOX)?;
         let timestamps = button("Includi time&stamp", IDC_TIMESTAMPS, BS_AUTOCHECKBOX)?;
+        let fast = button("Modalità ra&pida (meno precisa)", IDC_FAST, BS_AUTOCHECKBOX)?;
         let start = button("A&vvia trascrizione", IDC_START, BS_PUSHBUTTON)?;
         let cancel = button("A&nnulla", IDC_CANCEL, BS_PUSHBUTTON)?;
         let progress_label = label("Avanzamento:")?;
@@ -526,14 +539,11 @@ impl App {
         annotator.set_name(audio_path, "File audio");
         annotator.set_name(model, "Modello");
         annotator.set_name(lang, "Lingua");
-        annotator.set_name(device, "Dispositivo di calcolo");
+        annotator.set_description(use_gpu, &gpu_availability_text());
+        annotator.set_name(device, "Scheda video");
         annotator.set_description(
-            device,
-            if device::compiled_gpu_backends().is_empty() {
-                "Questa versione usa solo il processore: non include il supporto per le schede video."
-            } else {
-                "La scheda video è molto più veloce del processore."
-            },
+            fast,
+            "Sulla scheda video è fino a due volte più veloce, con qualche errore in più nel testo; sul processore il guadagno è minimo.",
         );
         annotator.set_name(progress, "Avanzamento");
         // Il controllo di stato non riceve un nome: per un testo statico il nome è il
@@ -565,10 +575,12 @@ impl App {
                 model,
                 lang_label,
                 lang,
+                use_gpu,
                 device_label,
                 device,
                 translate,
                 timestamps,
+                fast,
                 start,
                 cancel,
                 progress_label,
@@ -593,6 +605,7 @@ impl App {
             phase: Cell::new(None),
             last_milestone: Cell::new(0),
             started: Cell::new(None),
+            gpu_warning_shown: Cell::new(false),
             status: RefCell::new("Pronto.".to_string()),
             last_focus: Cell::new(browse),
             cancel_flag: RefCell::new(Arc::new(AtomicBool::new(false))),
@@ -602,7 +615,7 @@ impl App {
         })
     }
 
-    fn all_controls(&self) -> [HWND; 22] {
+    fn all_controls(&self) -> [HWND; 24] {
         let c = &self.c;
         [
             c.audio_label,
@@ -612,10 +625,12 @@ impl App {
             c.model,
             c.lang_label,
             c.lang,
+            c.use_gpu,
             c.device_label,
             c.device,
             c.translate,
             c.timestamps,
+            c.fast,
             c.start,
             c.cancel,
             c.progress_label,
@@ -648,7 +663,10 @@ impl App {
             .map_or(0, |i| i + 1);
         win::combo_select(self.c.lang, lang_index);
 
+        let gpus = device::list_gpus();
+        win::set_checked(self.c.use_gpu, settings.device != Device::Cpu && !gpus.is_empty());
         self.fill_device_combo(settings.device);
+        self.update_device_enabled();
 
         for format in ExportFormat::ALL {
             win::combo_add(self.c.format, format.label());
@@ -661,6 +679,10 @@ impl App {
 
         win::set_checked(self.c.translate, settings.translate);
         win::set_checked(self.c.timestamps, settings.timestamps);
+        win::set_checked(self.c.fast, settings.fast_mode);
+        self.update_flash_menu(settings.flash_attention);
+        // Stato iniziale: dice subito se si userà la scheda video (leggibile con F2).
+        self.set_status(&format!("Pronto. {}", self.device_summary()), false);
 
         self.set_idle_state();
         self.layout();
@@ -737,35 +759,97 @@ impl App {
             .map(ModelChoice::Custom)
     }
 
-    /// Voci: «Automatico», «Processore (CPU)», poi una voce per ogni scheda video trovata.
+    /// Elenca le schede video; la preselezionata è quella salvata o, in mancanza,
+    /// quella che sceglierebbe «Automatico» (la prima dedicata).
     fn fill_device_combo(&self, selected: Device) {
         let gpus = device::list_gpus();
-        let automatic = match Device::Auto.resolve(gpus) {
-            Ok(ResolvedDevice::Gpu(gpu)) => format!("Automatico (ora: {})", gpu.description),
-            _ => "Automatico (ora: processore)".to_string(),
-        };
         win::combo_reset(self.c.device);
-        win::combo_add(self.c.device, &automatic);
-        win::combo_add(self.c.device, "Processore (CPU)");
-        for gpu in gpus {
-            win::combo_add(self.c.device, &gpu.label());
+        if gpus.is_empty() {
+            win::combo_add(self.c.device, "Nessuna scheda video utilizzabile");
+            win::combo_select(self.c.device, 0);
+            return;
         }
-        let index = match selected {
-            Device::Auto => 0,
-            Device::Cpu => 1,
-            Device::Gpu(i) => gpus.iter().position(|g| g.index == i).map_or(0, |p| p + 2),
+        for gpu in gpus {
+            win::combo_add(self.c.device, &gpu.short_label());
+        }
+        let preferred = match selected {
+            Device::Gpu(i) => Some(i),
+            _ => match Device::Auto.resolve(gpus) {
+                Ok(ResolvedDevice::Gpu(gpu)) => Some(gpu.index),
+                _ => None,
+            },
         };
+        let index = preferred
+            .and_then(|i| gpus.iter().position(|g| g.index == i))
+            .unwrap_or(0);
         win::combo_select(self.c.device, index);
     }
 
+    /// Dispositivo scelto: la scheda video selezionata se l'opzione è attiva, altrimenti la CPU.
     fn selected_device(&self) -> Device {
-        match win::combo_selected(self.c.device) {
-            Some(1) => Device::Cpu,
-            Some(n) if n >= 2 => device::list_gpus()
-                .get(n - 2)
-                .map_or(Device::Auto, |g| Device::Gpu(g.index)),
-            _ => Device::Auto,
+        if !win::is_checked(self.c.use_gpu) {
+            return Device::Cpu;
         }
+        win::combo_selected(self.c.device)
+            .and_then(|i| device::list_gpus().get(i))
+            .map_or(Device::Auto, |g| Device::Gpu(g.index))
+    }
+
+    /// La scelta della scheda ha senso solo con la GPU attiva e almeno una scheda presente.
+    fn update_device_enabled(&self) {
+        let enabled = win::is_checked(self.c.use_gpu) && !device::list_gpus().is_empty();
+        win::enable(self.c.device, enabled && !self.busy.get());
+        win::enable(self.c.device_label, enabled);
+    }
+
+    /// Frase che dice su quale dispositivo avverrà la trascrizione.
+    fn device_summary(&self) -> String {
+        match self.selected_device().resolve(device::list_gpus()) {
+            Ok(ResolvedDevice::Gpu(gpu)) => {
+                format!("La trascrizione userà la scheda video {}.", gpu.description)
+            }
+            _ if win::is_checked(self.c.use_gpu) || device::list_gpus().is_empty() => {
+                format!("La trascrizione userà il processore: {}", gpu_availability_text())
+            }
+            _ => "La trascrizione userà il processore (scheda video disattivata).".to_string(),
+        }
+    }
+
+    fn on_use_gpu_toggled(&self) {
+        let checked = win::is_checked(self.c.use_gpu);
+        if checked && device::list_gpus().is_empty() {
+            win::set_checked(self.c.use_gpu, false);
+            win::message_box(
+                Some(self.hwnd),
+                &gpu_availability_text(),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+        self.settings.borrow_mut().device = self.selected_device();
+        self.update_device_enabled();
+        self.set_status(&self.device_summary(), true);
+    }
+
+    fn update_flash_menu(&self, enabled: bool) {
+        let state = if enabled { MF_CHECKED } else { MF_UNCHECKED };
+        unsafe {
+            CheckMenuItem(self.menu, u32::from(IDM_FLASH), (MF_BYCOMMAND | state).0);
+        }
+    }
+
+    fn toggle_flash_attention(&self) {
+        let enabled = {
+            let mut settings = self.settings.borrow_mut();
+            settings.flash_attention = !settings.flash_attention;
+            settings.flash_attention
+        };
+        self.update_flash_menu(enabled);
+        let message = if enabled {
+            "Accelerazione Flash Attention attivata: su alcune schede video accelera, su altre e sul processore rallenta. Confronta il tempo impiegato."
+        } else {
+            "Accelerazione Flash Attention disattivata."
+        };
+        self.set_status(message, true);
     }
 
     fn selected_language(&self) -> Option<String> {
@@ -888,9 +972,14 @@ impl App {
             IDC_LANG if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().language = self.selected_language();
             }
+            IDC_USE_GPU if code == BN_CLICKED => self.on_use_gpu_toggled(),
             IDC_DEVICE if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().device = self.selected_device();
             }
+            IDC_FAST if code == BN_CLICKED => {
+                self.settings.borrow_mut().fast_mode = win::is_checked(self.c.fast);
+            }
+            IDM_FLASH if !self.busy.get() => self.toggle_flash_attention(),
             IDC_FORMAT if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().export_format = self.selected_format();
             }
@@ -1080,11 +1169,15 @@ impl App {
             translate: translated,
             threads: None,
             initial_prompt: None,
+            fast: win::is_checked(self.c.fast),
         };
         let job = Job {
             audio_path,
             model_path,
             device: self.selected_device(),
+            engine: EngineOptions {
+                flash_attention: self.settings.borrow().flash_attention,
+            },
             options,
         };
         let model_name = model.display_name();
@@ -1325,13 +1418,19 @@ impl App {
             gpus.iter().map(|g| g.label()).collect::<Vec<_>>().join("\n")
         };
         let text = format!(
-            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n\nCartella dei modelli:\n{}",
+            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n{summary}\nFlash Attention: {flash}\n\nCartella dei modelli:\n{}",
             trascrittore_core::APP_NAME,
             trascrittore_core::APP_VERSION,
             transcriber::engine_version(),
             models::models_dir()
                 .map(|d| d.display().to_string())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            summary = self.device_summary(),
+            flash = if self.settings.borrow().flash_attention {
+                "attiva"
+            } else {
+                "disattivata"
+            },
         );
         win::message_box(Some(self.hwnd), &text, MB_OK | MB_ICONINFORMATION);
     }
@@ -1374,9 +1473,11 @@ impl App {
             self.c.browse,
             self.c.model,
             self.c.lang,
+            self.c.use_gpu,
             self.c.device,
             self.c.translate,
             self.c.timestamps,
+            self.c.fast,
             self.c.start,
             self.c.export,
             self.c.format,
@@ -1394,15 +1495,17 @@ impl App {
             self.c.browse,
             self.c.model,
             self.c.lang,
-            self.c.device,
+            self.c.use_gpu,
             self.c.translate,
             self.c.timestamps,
+            self.c.fast,
             self.c.start,
             self.c.export,
             self.c.format,
         ] {
             win::enable(hwnd, true);
         }
+        self.update_device_enabled();
         self.focus(focus);
         win::enable(self.c.cancel, false);
         self.update_menu();
@@ -1424,6 +1527,7 @@ impl App {
                 (IDM_CANCEL, busy),
                 (IDM_DOWNLOAD, !busy),
                 (IDM_CUSTOM_MODEL, !busy),
+                (IDM_FLASH, !busy),
             ] {
                 let _ = EnableMenuItem(self.menu, u32::from(id), MF_BYCOMMAND | state(enabled));
             }
@@ -1504,7 +1608,11 @@ impl App {
     }
 
     fn on_transcribed(&self, outcome: Outcome) {
-        let Outcome { transcript, device } = outcome;
+        let Outcome {
+            transcript,
+            device,
+            gpu_warning,
+        } = outcome;
         let elapsed = self
             .started
             .get()
@@ -1541,9 +1649,18 @@ impl App {
         if words == 0 {
             status = "Trascrizione completata, ma non è stato riconosciuto alcun parlato.".into();
         }
+        if let Some(warning) = &gpu_warning {
+            status.push(' ');
+            status.push_str(warning);
+        }
         // Prima si sposta il focus sul testo, poi si annuncia l'esito.
         self.end_busy(self.c.text);
         self.set_status(&status, true);
+        if let Some(warning) = gpu_warning {
+            if !self.gpu_warning_shown.replace(true) {
+                win::message_box(Some(self.hwnd), &warning, MB_OK | MB_ICONWARNING);
+            }
+        }
     }
 
     // ----- Stato e annunci -----
@@ -1660,7 +1777,7 @@ impl App {
         let gap = self.px(8);
         let text_h = self.text_size("Ag").cy.max(self.px(14));
         let ctrl_h = text_h + self.px(10);
-        let label_w = ["File audio:", "Modello:", "Lingua:", "Dispositivo:", "Avanzamento:", "Stato:"]
+        let label_w = ["File audio:", "Modello:", "Lingua:", "Scheda video:", "Avanzamento:", "Stato:"]
             .iter()
             .map(|l| self.text_size(l).cx)
             .max()
@@ -1692,13 +1809,25 @@ impl App {
         place(c.lang, x1, y, field_w.min(self.px(360)), ctrl_h * 14);
         y += ctrl_h + gap;
 
+        place(c.use_gpu, x1, y, check_w("Usa la scheda video (GPU)"), ctrl_h);
+        y += ctrl_h + gap;
+
         place(c.device_label, margin, label_y(y), label_w - gap, text_h);
         place(c.device, x1, y, field_w, ctrl_h * 8);
         y += ctrl_h + gap;
 
         let translate_w = check_w("Traduci in inglese");
+        let timestamps_w = check_w("Includi timestamp");
+        let check_gap = self.px(16);
         place(c.translate, x1, y, translate_w, ctrl_h);
-        place(c.timestamps, x1 + translate_w + self.px(16), y, check_w("Includi timestamp"), ctrl_h);
+        place(c.timestamps, x1 + translate_w + check_gap, y, timestamps_w, ctrl_h);
+        place(
+            c.fast,
+            x1 + translate_w + timestamps_w + check_gap * 2,
+            y,
+            check_w("Modalità rapida (meno precisa)"),
+            ctrl_h,
+        );
         y += ctrl_h + gap;
 
         let start_w = button_w("Avvia trascrizione");
@@ -1731,6 +1860,27 @@ impl App {
             button_w("Esporta..."),
             ctrl_h,
         );
+    }
+}
+
+/// Spiega se e perché la scheda video è disponibile.
+fn gpu_availability_text() -> String {
+    let backends = device::compiled_gpu_backends();
+    let gpus = device::list_gpus();
+    if backends.is_empty() {
+        "Questa versione di Trascrittore è stata compilata senza supporto per le schede video e usa solo il processore. Usa la versione con supporto GPU (cartella dist, creata da scripts\\build.ps1)."
+            .to_string()
+    } else if gpus.is_empty() {
+        format!(
+            "Nessuna scheda video compatibile trovata ({}): aggiorna i driver della scheda video. Nel frattempo si usa il processore.",
+            backends.join(", ")
+        )
+    } else {
+        let names: Vec<&str> = gpus.iter().map(|g| g.description.as_str()).collect();
+        format!(
+            "Schede video disponibili: {}. Molto più veloci del processore.",
+            names.join(", ")
+        )
     }
 }
 

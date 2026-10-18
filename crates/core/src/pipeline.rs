@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::audio;
 use crate::device::{self, Device, ResolvedDevice};
-use crate::transcriber::{TranscribeOptions, Transcriber};
+use crate::transcriber::{EngineOptions, TranscribeOptions, Transcriber};
 use crate::transcript::Transcript;
 
 /// Avanzamento di una trascrizione.
@@ -18,7 +18,7 @@ pub enum Progress {
     Decoding(f32),
     /// Caricamento del modello in memoria sul dispositivo indicato.
     LoadingModel(ResolvedDevice),
-    /// Trascrizione in corso (0–100).
+    /// Trascrizione in corso (0–100) sul dispositivo effettivamente in uso.
     Transcribing(i32),
 }
 
@@ -31,6 +31,7 @@ pub struct Job {
     pub audio_path: PathBuf,
     pub model_path: PathBuf,
     pub device: Device,
+    pub engine: EngineOptions,
     pub options: TranscribeOptions,
 }
 
@@ -39,12 +40,14 @@ pub struct Job {
 pub struct Outcome {
     pub transcript: Transcript,
     pub device: ResolvedDevice,
+    /// Presente se la scheda video richiesta non è stata usata.
+    pub gpu_warning: Option<String>,
 }
 
 /// Esegue decodifica e trascrizione.
 ///
-/// `cache` conserva il modello caricato fra una chiamata e l'altra: se modello e dispositivo
-/// richiesti sono già in memoria non vengono ricaricati.
+/// `cache` conserva il modello caricato fra una chiamata e l'altra: se modello, dispositivo
+/// e opzioni del motore sono gli stessi non viene ricaricato.
 pub fn run(
     job: &Job,
     cache: &mut Option<Transcriber>,
@@ -60,7 +63,7 @@ pub fn run(
         &cancel,
     )?;
 
-    let transcriber = load_cached(cache, &job.model_path, &device, &progress)?;
+    let transcriber = load_cached(cache, &job.model_path, &device, job.engine, &progress)?;
 
     let report = Arc::clone(&progress);
     report(Progress::Transcribing(0));
@@ -71,23 +74,30 @@ pub fn run(
         cancel,
     )?;
     transcript.audio_duration_ms = audio.duration_ms();
-    Ok(Outcome { transcript, device })
+    Ok(Outcome {
+        transcript,
+        device: transcriber.device().clone(),
+        gpu_warning: transcriber.gpu_warning().map(str::to_string),
+    })
 }
 
 fn load_cached<'a>(
     cache: &'a mut Option<Transcriber>,
     model_path: &Path,
     device: &ResolvedDevice,
+    engine: EngineOptions,
     progress: &ProgressFn,
 ) -> Result<&'a Transcriber> {
-    let reload = cache
-        .as_ref()
-        .is_none_or(|t| t.model_path() != model_path || t.device() != device);
+    let reload = cache.as_ref().is_none_or(|t| {
+        t.model_path() != model_path
+            || t.requested_device() != device
+            || t.engine_options() != engine
+    });
     if reload {
         // Libera prima il modello precedente: i modelli grandi occupano gigabyte.
         *cache = None;
         progress(Progress::LoadingModel(device.clone()));
-        *cache = Some(Transcriber::load(model_path, device)?);
+        *cache = Some(Transcriber::load(model_path, device, engine)?);
     }
     Ok(cache.as_ref().expect("modello appena caricato"))
 }

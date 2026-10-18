@@ -81,12 +81,20 @@ impl GpuInfo {
         } else {
             "Scheda video"
         };
+        format!("{kind}: {}", self.short_label())
+    }
+
+    /// Nome e dettagli senza il prefisso «Scheda video», per elenchi già etichettati.
+    pub fn short_label(&self) -> String {
         let mut details = Vec::new();
+        if self.integrated {
+            details.push("integrata".to_string());
+        }
         if self.memory_bytes > 0 {
             details.push(format_memory(self.memory_bytes));
         }
         details.push(self.backend.clone());
-        format!("{kind}: {} ({})", self.description, details.join(", "))
+        format!("{} ({})", self.description, details.join(", "))
     }
 }
 
@@ -243,6 +251,42 @@ fn enumerate() -> Vec<GpuInfo> {
 #[cfg(not(feature = "whisper"))]
 fn enumerate() -> Vec<GpuInfo> {
     Vec::new()
+}
+
+/// Memoria (libera, totale) in byte della scheda video con l'indice di whisper.cpp.
+#[cfg(feature = "whisper")]
+pub fn memory(gpu_index: u32) -> Option<(u64, u64)> {
+    use whisper_rs::whisper_rs_sys as sys;
+
+    // SAFETY: stesse funzioni di sola lettura usate in `enumerate`.
+    unsafe {
+        let mut index = 0u32;
+        for i in 0..sys::ggml_backend_dev_count() {
+            let device = sys::ggml_backend_dev_get(i);
+            if device.is_null() {
+                continue;
+            }
+            let kind = sys::ggml_backend_dev_type(device);
+            if kind != sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU
+                && kind != sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU
+            {
+                continue;
+            }
+            if index == gpu_index {
+                let mut free = 0usize;
+                let mut total = 0usize;
+                sys::ggml_backend_dev_memory(device, &mut free, &mut total);
+                return Some((free as u64, total as u64));
+            }
+            index += 1;
+        }
+    }
+    None
+}
+
+#[cfg(not(feature = "whisper"))]
+pub fn memory(_gpu_index: u32) -> Option<(u64, u64)> {
+    None
 }
 
 /// Formatta la memoria video (es. «16 GB»).
