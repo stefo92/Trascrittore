@@ -1,0 +1,32 @@
+# Compila, prova e verifica la versione portable per macOS su un Mac Apple Silicon (macos-14).
+name: macOS (Apple Silicon)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  portable:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Target Rust per Apple Silicon
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Test
+        run: bash scripts/build-macos.sh test --workspace
+
+      - name: Build release e versione portable
+        run: bash scripts/build-macos.sh build --release
+
+      # I runner di GitHub possono non avere una GPU Metal utilizzabile: in quel caso la prova
+      # sulla GPU viene saltata con un avviso (vedi VERIFICA_GPU_OBBLIGATORIA nello script).
+      - name: Verifica della versione portable
+        run: bash scripts/verifica-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trascrittore-portable-macos
+          path: dist/Trascrittore-portable-macos.zip

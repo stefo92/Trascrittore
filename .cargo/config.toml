@@ -1,7 +1,18 @@
+# Runtime C/C++ statico (/MT): gli eseguibili non richiedono il Visual C++ Redistributable
+# (MSVCP140.dll, VCRUNTIME140.dll) e partono da una chiavetta USB su qualsiasi Windows.
+# Il runtime di Rust e quello di whisper.cpp (vedi CMAKE_*_FLAGS_RELEASE sotto) devono coincidere.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
+
 [env]
 # Con MSVC il crate `cmake` sostituisce CMAKE_<LINGUAGGIO>_FLAGS_RELEASE togliendo i flag /O:
 # nelle build release whisper.cpp verrebbe compilato senza ottimizzazioni (circa 12 volte
 # più lento sulla CPU). whisper-rs-sys inoltra a CMake le variabili CMAKE_*, e quando sono
 # definite il crate `cmake` non le modifica.
-CMAKE_C_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
-CMAKE_CXX_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+# /MT è il runtime statico, come Rust con +crt-static. Dopo una modifica di questi flag serve
+# `cargo clean --release -p whisper-rs-sys`, perché CMake conserva la configurazione precedente.
+# WHISPER_USE_OPENVINO attiva in whisper.cpp le chiamate all'encoder OpenVINO, le cui tre
+# funzioni (`whisper_openvino_*`) sono definite in crates/core/src/openvino.rs: non serve il
+# toolkit OpenVINO per compilare. Senza encoder OpenVINO attivo whisper.cpp funziona come prima.
+CMAKE_C_FLAGS_RELEASE = "/MT /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MT /O2 /Ob2 /DNDEBUG /DWHISPER_USE_OPENVINO"

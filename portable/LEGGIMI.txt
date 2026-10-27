@@ -1,0 +1,83 @@
+Trascrittore, versione portable
+
+Trascrittore trascrive file audio in testo direttamente sul tuo computer, con Whisper, ed esporta la trascrizione in TXT, HTML, PDF e DOCX. Funziona con NVDA, JAWS e Assistente vocale e si usa interamente da tastiera. L'audio non viene mai inviato in rete.
+
+Questa versione non va installata. Puoi copiare la cartella su una chiavetta USB, su un disco esterno o in qualsiasi cartella del computer e avviarla da lì.
+
+
+Requisiti
+
+Windows 10 o Windows 11 a 64 bit. Non serve installare altro, nemmeno il Visual C++ Redistributable.
+
+Per usare la scheda video (molto più veloce del processore) servono i driver della scheda con il supporto Vulkan: lo hanno tutti i driver recenti di AMD, NVIDIA e Intel. Se Vulkan non è installato, Trascrittore parte comunque e usa il processore.
+
+
+Contenuto della cartella
+
+trascrittore.exe: il programma, con l'interfaccia grafica.
+trascrittore-cli.exe: il programma a riga di comando.
+dati: la cartella con le impostazioni e, nella sottocartella modelli, i modelli di trascrizione.
+portable.txt: attiva la modalità portable. Non eliminarlo.
+LEGGIMI.txt: questo file.
+
+
+Primo avvio
+
+1. Avvia trascrittore.exe.
+2. Premi Ctrl+O per scegliere il file audio.
+3. Premi F5 per avviare la trascrizione. La prima volta Trascrittore chiede di scaricare il modello di trascrizione e ne indica la dimensione: il modello consigliato occupa 574 MB.
+4. Al termine il cursore si sposta sul testo trascritto, che puoi leggere e correggere.
+5. Premi Ctrl+S per esportare il testo.
+
+F1 apre la guida rapida dei tasti, F2 legge lo stato corrente, Esc annulla l'operazione in corso.
+
+
+Dove vengono salvati i dati
+
+Impostazioni e modelli restano nella cartella dati, accanto al programma: Trascrittore non scrive nulla nel profilo dell'utente del computer che stai usando. In modalità portable i file aperti o esportati non vengono aggiunti agli elementi recenti di Windows.
+
+I modelli sono file grandi: assicurati che sulla chiavetta ci sia spazio sufficiente. Per evitare il download puoi copiare un modello già scaricato (un file come ggml-large-v3-turbo-q5_0.bin) nella cartella dati\modelli. Il comando «Apri la cartella dei modelli» del menu Trascrizione la apre in Esplora file; «Informazioni su Trascrittore», nel menu Aiuto, indica la cartella dei dati in uso.
+
+Il driver della scheda video può conservare nel profilo dell'utente una propria cache degli shader: è un comportamento del driver, non di Trascrittore.
+
+
+Scheda video
+
+La casella «Usa la scheda video» (Alt+C) attiva o disattiva la scheda video. Se la scheda video non funziona o il programma si blocca all'avvio con un driver difettoso, puoi disattivare Vulkan del tutto impostando la variabile d'ambiente TRASCRITTORE_NO_VULKAN=1: Trascrittore userà solo il processore.
+
+
+OpenVINO (acceleratori neurali e schede video Intel)
+
+Sui computer con un acceleratore neurale Intel (NPU, per esempio «Intel AI Boost») o una scheda video Intel, l'encoder di Whisper può essere eseguito con OpenVINO.
+
+1. Con Tab arriva alla casella «OpenVINO (Intel)», dopo «Scheda video». Se OpenVINO non è installato, la casella lo dice e subito dopo c'è il pulsante «Installa OpenVINO» (la stessa voce è nel menu Trascrizione). Il programma scarica circa 237 MB dal sito di Intel e installa OpenVINO nella cartella dati\openvino (circa 210 MB).
+2. Scegli il dispositivo nella casella «OpenVINO (Intel)»: acceleratore neurale, scheda video Intel o processore.
+3. Scegli un modello Base, Small, Medium o Large v3 (anche compressi): solo per questi esiste un encoder OpenVINO già pronto, che il programma propone di scaricare la prima volta. Il modello predefinito, Large v3 Turbo, non ne ha uno.
+
+OpenVINO funziona anche sul processore, dove rende l'encoder più veloce, ma non con le schede video AMD o NVIDIA.
+
+
+Riga di comando
+
+Apri il prompt dei comandi nella cartella di Trascrittore. Alcuni esempi:
+
+trascrittore-cli trascrivi intervista.mp3 --lingua it --formato docx,pdf
+trascrittore-cli trascrivi riunione.mp3 --dispositivo cpu
+trascrittore-cli dispositivi
+trascrittore-cli modelli
+trascrittore-cli --help
+
+L'avanzamento viene stampato su righe separate, leggibili con lo screen reader.
+
+
+Licenze
+
+Trascrittore è distribuito con licenza MIT.
+
+Include whisper.cpp e ggml, con licenza MIT: Copyright (c) 2023-2024 The ggml authors. Il testo della licenza MIT è disponibile all'indirizzo https://opensource.org/license/mit.
+
+Il runtime C e C++ di Microsoft Visual C++ è incluso negli eseguibili (collegamento statico), come consentito dalla licenza di Visual Studio.
+
+Il caricatore Vulkan (vulkan-1.dll, licenza Apache 2.0) non è incluso: Trascrittore usa quello installato dai driver della scheda video.
+
+OpenVINO non è incluso: se lo installi dal programma, viene scaricato dal sito di Intel insieme alle sue licenze (Apache 2.0 e condizioni Intel), che si trovano in dati\openvino\licenze.

@@ -1,11 +1,11 @@
 //! Trascrizione con whisper.cpp tramite `whisper-rs`.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::device::ResolvedDevice;
@@ -25,6 +25,51 @@ pub struct TranscribeOptions {
     pub initial_prompt: Option<String>,
     /// Modalità rapida: ricerca greedy invece della beam search (più veloce, meno precisa).
     pub fast: bool,
+    /// Encoder OpenVINO (Intel) da usare al posto di quello di ggml.
+    pub openvino: Option<OpenVinoEncoder>,
+}
+
+/// Encoder OpenVINO e dispositivo su cui eseguirlo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenVinoEncoder {
+    /// File `.xml` dell'encoder (con il `.bin` accanto).
+    pub encoder_path: PathBuf,
+    /// Dispositivo OpenVINO (es. `NPU`, `GPU.0`, `CPU`).
+    pub device: String,
+    /// Descrizione del dispositivo per i messaggi.
+    pub device_label: String,
+}
+
+/// Esito dell'uso di OpenVINO in una trascrizione.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenVinoUse {
+    /// L'encoder è stato eseguito con OpenVINO sul dispositivo indicato.
+    Active { device_label: String },
+    /// OpenVINO non si è attivato: è stato usato l'encoder normale.
+    Failed { reason: String },
+}
+
+/// Risultato di [`Transcriber::transcribe`].
+#[derive(Debug, Clone)]
+pub struct Transcription {
+    pub transcript: Transcript,
+    /// Presente se era richiesto OpenVINO.
+    pub openvino: Option<OpenVinoUse>,
+}
+
+/// Dati della callback chiamata da whisper.cpp prima di ogni blocco dell'encoder.
+struct EncoderBegin {
+    cancel: Arc<AtomicBool>,
+    openvino: Option<OpenVinoStart>,
+    failures_before: usize,
+}
+
+struct OpenVinoStart {
+    encoder: CString,
+    device: CString,
+    cache: CString,
+    /// `None` finché non si è provato ad attivarlo, poi l'esito.
+    started: Option<bool>,
 }
 
 /// Opzioni di caricamento del modello.
@@ -148,7 +193,7 @@ impl Transcriber {
         options: &TranscribeOptions,
         progress: impl FnMut(i32) + 'static,
         cancel: Arc<AtomicBool>,
-    ) -> Result<Transcript> {
+    ) -> Result<Transcription> {
         let mut state = self
             .context
             .create_state()
@@ -189,11 +234,50 @@ impl Transcriber {
             params.set_abort_callback_user_data(Arc::as_ptr(&cancel) as *mut c_void);
         }
 
+        // Callback prima di ogni blocco dell'encoder: attiva OpenVINO sullo stato di questa
+        // trascrizione (whisper-rs non espone i puntatori a contesto e stato, la callback li
+        // riceve) e ferma il lavoro se è stato annullato o se l'encoder OpenVINO ha fallito.
+        let mut begin = EncoderBegin {
+            cancel: Arc::clone(&cancel),
+            openvino: match &options.openvino {
+                Some(ov) => Some(openvino_start(ov)?),
+                None => None,
+            },
+            failures_before: crate::openvino::encode_failures(),
+        };
+        // SAFETY: `begin` resta vivo e non viene spostato fino al termine di `full`.
+        unsafe {
+            params.set_start_encoder_callback(Some(encoder_begin_trampoline));
+            params.set_start_encoder_callback_user_data(
+                (&mut begin as *mut EncoderBegin).cast::<c_void>(),
+            );
+        }
+
         let result = state.full(params, samples);
         if cancel.load(Ordering::Relaxed) {
             return Err(Cancelled.into());
         }
+        if crate::openvino::encode_failures() != begin.failures_before {
+            bail!(
+                "L'encoder OpenVINO non è riuscito a elaborare l'audio: {}. Scegli «Non usare» per OpenVINO e riprova.",
+                crate::openvino::last_error().unwrap_or_else(|| "errore sconosciuto".into())
+            );
+        }
         result.map_err(|e| anyhow!("La trascrizione non è riuscita: {e}"))?;
+
+        let openvino = match (&options.openvino, begin.openvino.as_ref().and_then(|s| s.started)) {
+            (None, _) => None,
+            (Some(ov), Some(true)) => Some(OpenVinoUse::Active {
+                device_label: ov.device_label.clone(),
+            }),
+            (Some(_), Some(false)) => Some(OpenVinoUse::Failed {
+                reason: crate::openvino::last_error()
+                    .unwrap_or_else(|| "preparazione dell'encoder non riuscita".into()),
+            }),
+            (Some(_), None) => Some(OpenVinoUse::Failed {
+                reason: "l'audio è troppo breve per usare l'encoder".into(),
+            }),
+        };
 
         let mut segments = Vec::new();
         for segment in state.as_iter() {
@@ -215,19 +299,79 @@ impl Transcriber {
             detected.or_else(|| options.language.clone())
         };
 
-        Ok(Transcript {
-            segments,
-            language,
-            audio_duration_ms: samples.len() as u64 * 1000
-                / u64::from(crate::audio::WHISPER_SAMPLE_RATE),
+        Ok(Transcription {
+            transcript: Transcript {
+                segments,
+                language,
+                audio_duration_ms: samples.len() as u64 * 1000
+                    / u64::from(crate::audio::WHISPER_SAMPLE_RATE),
+            },
+            openvino,
         })
     }
+}
+
+/// Prepara le stringhe C per l'attivazione dell'encoder OpenVINO.
+fn openvino_start(ov: &OpenVinoEncoder) -> Result<OpenVinoStart> {
+    let encoder = &ov.encoder_path;
+    if !encoder.is_file() || !encoder.with_extension("bin").is_file() {
+        bail!("Encoder OpenVINO non trovato: «{}».", encoder.display());
+    }
+    crate::openvino::clear_last_error();
+    // Cache dei modelli compilati accanto all'encoder: rende rapidi gli avvii successivi.
+    let mut cache = encoder.with_extension("").into_os_string();
+    cache.push("-cache");
+    let to_c = |s: &std::ffi::OsStr| {
+        CString::new(s.to_string_lossy().into_owned())
+            .map_err(|_| anyhow!("Percorso non valido: «{}».", s.to_string_lossy()))
+    };
+    Ok(OpenVinoStart {
+        encoder: to_c(encoder.as_os_str())?,
+        device: CString::new(ov.device.clone()).map_err(|_| anyhow!("Dispositivo non valido."))?,
+        cache: to_c(&cache)?,
+        started: None,
+    })
+}
+
+/// Chiamata da whisper.cpp prima di ogni blocco dell'encoder; `false` ferma la trascrizione.
+unsafe extern "C" fn encoder_begin_trampoline(
+    ctx: *mut whisper_rs::whisper_rs_sys::whisper_context,
+    state: *mut whisper_rs::whisper_rs_sys::whisper_state,
+    user_data: *mut c_void,
+) -> bool {
+    if user_data.is_null() {
+        return true;
+    }
+    // SAFETY: `user_data` punta a `EncoderBegin`, vivo per tutta la chiamata a `full`, e
+    // whisper.cpp chiama la callback sempre dallo stesso thread.
+    let begin = unsafe { &mut *user_data.cast::<EncoderBegin>() };
+    if begin.cancel.load(Ordering::Relaxed)
+        || crate::openvino::encode_failures() != begin.failures_before
+    {
+        return false;
+    }
+    if let Some(ov) = begin.openvino.as_mut().filter(|ov| ov.started.is_none()) {
+        // SAFETY: contesto e stato validi forniti da whisper.cpp; stringhe C valide.
+        let code = unsafe {
+            whisper_rs::whisper_rs_sys::whisper_ctx_init_openvino_encoder_with_state(
+                ctx,
+                state,
+                ov.encoder.as_ptr(),
+                ov.device.as_ptr(),
+                ov.cache.as_ptr(),
+            )
+        };
+        ov.started = Some(code == 0);
+    }
+    true
 }
 
 /// Decide se il caricamento ha occupato memoria video.
 ///
 /// `memory` è (libera, totale) in byte. Se il driver non riporta la memoria libera
 /// (libera = totale sia prima sia dopo) non si può verificare e si assume che la GPU sia in uso.
+/// Con Metal (Apple Silicon) la memoria libera è quella non ancora allocata dal processo, quindi
+/// diminuisce allo stesso modo quando il modello viene caricato sulla GPU.
 fn gpu_memory_used(before: Option<(u64, u64)>, after: Option<(u64, u64)>, model_size: u64) -> bool {
     match (before, after) {
         (Some((free_before, total)), Some((free_after, _))) => {

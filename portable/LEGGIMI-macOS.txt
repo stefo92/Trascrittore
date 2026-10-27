@@ -1,0 +1,76 @@
+Trascrittore per Mac, versione portable
+
+Trascrittore trascrive file audio in testo direttamente sul tuo Mac, con Whisper, ed esporta la trascrizione in TXT, HTML, PDF e DOCX. L'audio non viene mai inviato in rete.
+
+Sul Mac Trascrittore si usa dal Terminale, che funziona con VoiceOver: l'interfaccia grafica per ora esiste solo per Windows. L'avanzamento viene stampato su righe separate, così VoiceOver lo legge senza confusione.
+
+Questa versione non va installata. Puoi copiare la cartella su una chiavetta USB, su un disco esterno o in qualsiasi cartella del Mac e usarla da lì.
+
+
+Requisiti
+
+Un Mac con processore Apple Silicon (M1 o successivo) e macOS 13 Ventura o successivo. La trascrizione usa la scheda video del Mac tramite Metal, che è già inclusa in macOS: non serve installare altro.
+
+
+Contenuto della cartella
+
+trascrittore-cli: il programma.
+dati: la cartella con le impostazioni e, nella sottocartella modelli, i modelli di trascrizione.
+portable.txt: attiva la modalità portable. Non eliminarlo.
+LEGGIMI.txt: questo file.
+
+
+Primo avvio
+
+Trascrittore non è autenticato da Apple, quindi macOS blocca il programma se la cartella è stata scaricata da Internet. Prima del primo uso:
+
+1. Nel Finder seleziona la cartella di Trascrittore e premi Comando+Opzione+C per copiarne il percorso.
+2. Apri il Terminale (cartella Applicazioni, poi Utility, poi Terminale).
+3. Scrivi cd seguito da uno spazio, incolla il percorso con Comando+V e premi Invio.
+4. Sblocca il programma con questo comando (il punto finale indica la cartella corrente):
+   xattr -dr com.apple.quarantine .
+5. Controlla che funzioni:
+   ./trascrittore-cli dispositivi
+
+Se la cartella non è stata scaricata da Internet (ad esempio è stata copiata da una chiavetta) il passo 4 non serve, ma non fa danni.
+
+
+Trascrivere un file
+
+Dal Terminale, nella cartella di Trascrittore:
+
+./trascrittore-cli trascrivi ~/Documents/intervista.m4a --lingua it --formato docx,pdf --scarica-modello
+
+La prima volta l'opzione --scarica-modello scarica il modello di trascrizione consigliato, che occupa 574 MB; le volte successive viene usato quello già scaricato. La trascrizione viene salvata accanto al file audio; con --uscita puoi scegliere un'altra cartella.
+
+Altri comandi utili:
+
+./trascrittore-cli dispositivi
+elenca il processore e la scheda video utilizzabili.
+
+./trascrittore-cli modelli
+elenca i modelli disponibili e quelli già scaricati.
+
+./trascrittore-cli trascrivi riunione.mp3 --dispositivo cpu
+usa solo il processore.
+
+./trascrittore-cli --help
+mostra tutte le opzioni.
+
+
+Dove vengono salvati i dati
+
+Impostazioni e modelli restano nella cartella dati, accanto al programma: Trascrittore non scrive nulla nella Libreria dell'utente del Mac che stai usando.
+
+I modelli sono file grandi: assicurati che sulla chiavetta ci sia spazio sufficiente. Per evitare il download puoi copiare un modello già scaricato (un file come ggml-large-v3-turbo-q5_0.bin, lo stesso usato dalla versione per Windows) nella cartella dati/modelli.
+
+macOS può conservare nella propria cartella temporanea una cache degli shader Metal usati dalla scheda video: è un comportamento di macOS, non di Trascrittore.
+
+
+Licenze
+
+Trascrittore è distribuito con licenza MIT.
+
+Include whisper.cpp e ggml, con licenza MIT: Copyright (c) 2023-2024 The ggml authors. Il testo della licenza MIT è disponibile all'indirizzo https://opensource.org/license/mit.
+
+Metal, Accelerate e le altre librerie usate fanno parte di macOS e non sono incluse nel programma.

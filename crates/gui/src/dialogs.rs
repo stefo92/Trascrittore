@@ -8,8 +8,8 @@ use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog, IFileSaveDialog, IShellItem,
-    SHCreateItemFromParsingName, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
-    FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH,
+    SHCreateItemFromParsingName, FILEOPENDIALOGOPTIONS, FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST,
+    FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH,
 };
 
 /// Filtro dei tipi di file: descrizione e modelli separati da punto e virgola (es. `*.mp3;*.wav`).
@@ -59,6 +59,16 @@ unsafe fn prepare(dialog: &IFileDialog, title: &str, filters: &FilterSpecs, fold
     }
 }
 
+/// In modalità portable i file scelti non vengono aggiunti agli «Elementi recenti» di Windows,
+/// che si trovano nel profilo dell'utente.
+fn portable_options() -> FILEOPENDIALOGOPTIONS {
+    if trascrittore_core::paths::portable_data_dir().is_some() {
+        FOS_DONTADDTORECENT
+    } else {
+        FILEOPENDIALOGOPTIONS(0)
+    }
+}
+
 unsafe fn result_path(dialog: &IFileDialog) -> Option<PathBuf> {
     let item = dialog.GetResult().ok()?;
     let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
@@ -77,7 +87,11 @@ pub fn open_file(owner: HWND, title: &str, filters: &[Filter], folder: Option<&P
         prepare(&base, title, &specs, folder);
         if let Ok(options) = base.GetOptions() {
             let _ = base.SetOptions(
-                options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM,
+                options
+                    | FOS_FILEMUSTEXIST
+                    | FOS_PATHMUSTEXIST
+                    | FOS_FORCEFILESYSTEM
+                    | portable_options(),
             );
         }
         base.Show(Some(owner)).ok()?;
@@ -105,7 +119,11 @@ pub fn save_file(
         let _ = base.SetDefaultExtension(&HSTRING::from(default_extension));
         if let Ok(options) = base.GetOptions() {
             let _ = base.SetOptions(
-                options | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM,
+                options
+                    | FOS_OVERWRITEPROMPT
+                    | FOS_PATHMUSTEXIST
+                    | FOS_FORCEFILESYSTEM
+                    | portable_options(),
             );
         }
         base.Show(Some(owner)).ok()?;

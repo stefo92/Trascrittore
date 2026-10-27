@@ -9,12 +9,15 @@ pub mod document;
 pub mod export;
 pub mod languages;
 pub mod models;
+pub mod openvino;
+pub mod paths;
 #[cfg(feature = "whisper")]
 pub mod pipeline;
 pub mod settings;
 #[cfg(feature = "whisper")]
 pub mod transcriber;
 pub mod transcript;
+pub mod vulkan;
 
 /// Nome dell'applicazione mostrato nei documenti e nei metadati.
 pub const APP_NAME: &str = "Trascrittore";

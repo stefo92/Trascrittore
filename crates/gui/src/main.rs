@@ -14,6 +14,8 @@ mod dialogs;
 #[cfg(windows)]
 mod win;
 
+trascrittore_core::vulkan_delay_load_hook!();
+
 #[cfg(windows)]
 fn main() {
     std::panic::set_hook(Box::new(|info| {

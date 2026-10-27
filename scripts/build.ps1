@@ -9,7 +9,8 @@
 
     Se il Vulkan SDK è installato, il supporto per le schede video (AMD, NVIDIA, Intel) viene
     incluso automaticamente; con --solo-cpu si compila la versione che usa solo il processore.
-    Dopo una build release i programmi pronti vengono copiati nella cartella dist\ del progetto.
+    Dopo una build release i programmi pronti vengono copiati nella cartella dist\ del progetto,
+    insieme alla versione portable (dist\Trascrittore-portable e dist\Trascrittore-portable.zip).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build.ps1 build --release
@@ -106,5 +107,38 @@ if ($code -eq 0 -and $command -eq "build" -and ($cargoArgs -contains "--release"
     }
     $kind = if ($gpu) { "con supporto per le schede video" } else { "solo processore" }
     Write-Output "Programmi pronti ($kind) in: $dist"
+
+    # Versione portable: cartella pronta da copiare su una chiavetta USB, più il suo zip.
+    # La cartella «dati» non viene svuotata (può contenere modelli scaricati) e non entra nello zip.
+    $exes = "trascrittore.exe", "trascrittore-cli.exe" | ForEach-Object { Join-Path $dist $_ }
+    if (($exes | Where-Object { -not (Test-Path $_) }).Count -eq 0) {
+        $portable = Join-Path $dist "Trascrittore-portable"
+        New-Item -ItemType Directory -Force (Join-Path $portable "dati\modelli") | Out-Null
+        foreach ($exe in $exes) { Copy-Item $exe $portable -Force }
+        # Testi in UTF-8 con BOM e a capo CRLF, leggibili anche con il Blocco note di Windows meno recenti.
+        $utf8Bom = New-Object System.Text.UTF8Encoding $true
+        foreach ($name in "LEGGIMI.txt", "portable.txt") {
+            $text = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\portable\$name"))
+            $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
+            [System.IO.File]::WriteAllText((Join-Path $portable $name), $text, $utf8Bom)
+        }
+
+        $zipPath = Join-Path $dist "Trascrittore-portable.zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($name in "trascrittore.exe", "trascrittore-cli.exe", "LEGGIMI.txt", "portable.txt") {
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $zip, (Join-Path $portable $name), "Trascrittore-portable/$name",
+                    [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+            [void]$zip.CreateEntry("Trascrittore-portable/dati/modelli/")
+        } finally {
+            $zip.Dispose()
+        }
+        Write-Output "Versione portable pronta in: $portable"
+        Write-Output "Archivio della versione portable: $zipPath"
+    }
 }
 exit $code

@@ -15,9 +15,14 @@ use trascrittore_core::device::{self, Device};
 use trascrittore_core::document::{Document, DocumentInfo};
 use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::pipeline::{self, Job, Progress, ProgressFn};
-use trascrittore_core::transcriber::{self, EngineOptions, TranscribeOptions, Transcriber};
+use trascrittore_core::openvino::{self, RuntimeStatus};
+use trascrittore_core::transcriber::{
+    self, EngineOptions, OpenVinoEncoder, OpenVinoUse, TranscribeOptions, Transcriber,
+};
 use trascrittore_core::transcript::format_duration_words;
-use trascrittore_core::{is_cancelled, languages, models};
+use trascrittore_core::{is_cancelled, languages, models, paths};
+
+trascrittore_core::vulkan_delay_load_hook!();
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +55,11 @@ enum Command {
     /// Elenca i dispositivi di calcolo: processore e schede video utilizzabili.
     #[command(visible_alias = "devices")]
     Dispositivi,
+    /// Mostra lo stato di OpenVINO (Intel) e i dispositivi utilizzabili per l'encoder.
+    Openvino,
+    /// Scarica e installa il runtime OpenVINO di Intel (circa 237 MB, dal sito di Intel).
+    #[command(visible_alias = "install-openvino")]
+    InstallaOpenvino,
 }
 
 #[derive(Args)]
@@ -73,6 +83,11 @@ struct TranscribeArgs {
     /// Attiva Flash Attention: su alcune schede video accelera, su altre (e sulla CPU) rallenta.
     #[arg(long, alias = "flash-attn")]
     flash_attention: bool,
+
+    /// Esegue l'encoder con OpenVINO (Intel) sul dispositivo indicato: npu, gpu, gpu.1, cpu
+    /// (vedi il comando «openvino»). Con --scarica-modello scarica anche l'encoder se manca.
+    #[arg(long, value_name = "DISPOSITIVO")]
+    openvino: Option<String>,
 
     /// Lingua parlata: codice ISO (es. it, en) oppure «auto» per il rilevamento automatico.
     #[arg(short, long, alias = "language", default_value = "auto")]
@@ -135,6 +150,11 @@ fn main() -> ExitCode {
             list_devices();
             Ok(())
         }
+        Command::Openvino => {
+            show_openvino();
+            Ok(())
+        }
+        Command::InstallaOpenvino => install_openvino(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -158,6 +178,15 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
     // Verifica subito il dispositivo, prima di eventuali download.
     args.dispositivo.resolve(device::list_gpus())?;
     let (model_path, model_name) = resolve_model(&args.modello, args.scarica_modello, args.silenzioso)?;
+    let openvino = match &args.openvino {
+        Some(spec) => Some(resolve_openvino(
+            spec,
+            &model_path,
+            args.scarica_modello,
+            args.silenzioso,
+        )?),
+        None => None,
+    };
     if let Some(dir) = &args.uscita {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Impossibile creare la cartella «{}».", dir.display()))?;
@@ -169,6 +198,7 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         threads: args.thread,
         initial_prompt: args.prompt.clone(),
         fast: args.rapida,
+        openvino,
     };
     let engine = EngineOptions {
         flash_attention: args.flash_attention,
@@ -203,6 +233,17 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         .and_then(|outcome| {
             if let Some(warning) = &outcome.gpu_warning {
                 eprintln!("Attenzione: {warning}");
+            }
+            match &outcome.openvino {
+                Some(OpenVinoUse::Active { device_label }) if !args.silenzioso => {
+                    eprintln!("Encoder eseguito con OpenVINO su {device_label}.");
+                }
+                Some(OpenVinoUse::Failed { reason }) => {
+                    eprintln!(
+                        "Attenzione: OpenVINO non si è attivato ({reason}); è stato usato l'encoder normale."
+                    );
+                }
+                _ => {}
             }
             if !args.silenzioso {
                 eprintln!(
@@ -354,25 +395,137 @@ fn download_model(info: &models::ModelInfo, quiet: bool) -> Result<PathBuf> {
         );
     }
     let cancel = AtomicBool::new(false);
-    let mut last_step = 0u64;
-    let path = models::download(
-        info,
-        |done, total| {
-            if quiet {
-                return;
-            }
-            if let Some(total) = total.filter(|t| *t > 0) {
-                let step = done * 100 / total / 10 * 10;
-                if step > last_step {
-                    last_step = step;
-                    eprintln!("Download: {step}%");
-                }
-            }
-        },
-        &cancel,
-    )?;
+    let path = models::download(info, download_printer(quiet), &cancel)?;
     eprintln!("Modello salvato in {}", path.display());
     Ok(path)
+}
+
+/// Stampa l'avanzamento di un download a passi del 10%.
+fn download_printer(quiet: bool) -> impl FnMut(u64, Option<u64>) {
+    let mut last_step = 0u64;
+    move |done, total| {
+        if quiet {
+            return;
+        }
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let step = done * 100 / total / 10 * 10;
+            if step > last_step {
+                last_step = step;
+                eprintln!("Download: {step}%");
+            }
+        }
+    }
+}
+
+/// Sceglie il dispositivo OpenVINO e trova (o scarica) l'encoder del modello.
+fn resolve_openvino(
+    spec: &str,
+    model_path: &Path,
+    download: bool,
+    quiet: bool,
+) -> Result<OpenVinoEncoder> {
+    let devices = match openvino::status() {
+        RuntimeStatus::Ready { devices, .. } => devices,
+        RuntimeStatus::NotInstalled => bail!(
+            "OpenVINO non è installato. Installalo con «trascrittore-cli installa-openvino» (circa {}).",
+            models::format_size(openvino::RUNTIME_DOWNLOAD_BYTES)
+        ),
+        RuntimeStatus::Unavailable(e) => bail!("OpenVINO non è utilizzabile: {e}"),
+    };
+    let wanted = spec.trim().to_ascii_uppercase();
+    let device = devices
+        .iter()
+        .find(|d| d.id.eq_ignore_ascii_case(&wanted))
+        .or_else(|| devices.iter().find(|d| d.id.to_ascii_uppercase().starts_with(&wanted)))
+        .with_context(|| {
+            let ids: Vec<&str> = devices.iter().map(|d| d.id.as_str()).collect();
+            format!(
+                "Dispositivo OpenVINO «{spec}» non disponibile. Dispositivi: {}.",
+                ids.join(", ")
+            )
+        })?;
+
+    let encoder_path = match openvino::find_encoder(model_path) {
+        Some(path) => path,
+        None => match openvino::package_for_model(model_path) {
+            Some(package) if download => {
+                if !quiet {
+                    eprintln!(
+                        "Download dell'encoder OpenVINO «{}» (pacchetto Intel, circa {})",
+                        package.family,
+                        models::format_size(package.size_bytes)
+                    );
+                }
+                let dir = model_path.parent().unwrap_or(Path::new("."));
+                let cancel = AtomicBool::new(false);
+                openvino::download_encoder(package, dir, download_printer(quiet), &cancel)?
+            }
+            Some(package) => bail!(
+                "Manca l'encoder OpenVINO del modello. Aggiungi --scarica-modello per scaricare il pacchetto Intel «{}» (circa {}).",
+                package.family,
+                models::format_size(package.size_bytes)
+            ),
+            None => bail!(
+                "Per questo modello non esiste un encoder OpenVINO già pronto: usa base, small, medium o large-v3 (anche compressi), oppure metti accanto al modello un encoder convertito chiamato «{}».",
+                openvino::encoder_file_name(openvino::model_family(
+                    model_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.trim_start_matches("ggml-"))
+                        .unwrap_or_default()
+                ))
+            ),
+        },
+    };
+    Ok(OpenVinoEncoder {
+        encoder_path,
+        device: device.id.clone(),
+        device_label: device.label(),
+    })
+}
+
+fn show_openvino() {
+    match openvino::status() {
+        RuntimeStatus::NotInstalled => println!(
+            "OpenVINO non è installato. Installalo con «trascrittore-cli installa-openvino» (circa {}, dal sito di Intel).",
+            models::format_size(openvino::RUNTIME_DOWNLOAD_BYTES)
+        ),
+        RuntimeStatus::Unavailable(e) => println!("OpenVINO trovato ma non utilizzabile: {e}"),
+        RuntimeStatus::Ready { dir, devices } => {
+            println!("OpenVINO in {}", dir.display());
+            for device in &devices {
+                println!("{}\t{}", device.id, device.label());
+            }
+            if !devices.iter().any(|d| d.kind() != "Processore") {
+                println!("Nessun acceleratore Intel (NPU o scheda video) trovato: è disponibile solo il processore.");
+            }
+        }
+    }
+    let families: Vec<&str> = openvino::ENCODER_PACKAGES.iter().map(|p| p.family).collect();
+    println!(
+        "Encoder OpenVINO già pronti per: {} (anche nelle versioni compresse).",
+        families.join(", ")
+    );
+}
+
+fn install_openvino() -> Result<()> {
+    eprintln!(
+        "Download di OpenVINO {} (circa {}) dal sito di Intel…",
+        openvino::RUNTIME_VERSION,
+        models::format_size(openvino::RUNTIME_DOWNLOAD_BYTES)
+    );
+    let cancel = AtomicBool::new(false);
+    match openvino::install_runtime(download_printer(false), &cancel)? {
+        openvino::InstallOutcome::Installed(dir) => {
+            eprintln!("OpenVINO installato in {}", dir.display());
+            show_openvino();
+        }
+        openvino::InstallOutcome::AfterRestart(dir) => eprintln!(
+            "OpenVINO è pronto in {}: verrà attivato al prossimo avvio del programma.",
+            dir.display()
+        ),
+    }
+    Ok(())
 }
 
 fn list_devices() {
@@ -383,12 +536,13 @@ fn list_devices() {
     }
     if backends.is_empty() {
         println!(
-            "Questa versione non include il supporto per le schede video: ricompila con --features vulkan (AMD, NVIDIA, Intel) o --features cuda (NVIDIA)."
+            "Questa versione non include il supporto per le schede video: ricompila con --features vulkan (AMD, NVIDIA, Intel), --features cuda (NVIDIA) o, su Mac Apple Silicon, --features metal."
         );
     } else if device::list_gpus().is_empty() {
         println!(
-            "Supporto GPU incluso ({}), ma nessuna scheda video utilizzabile: controlla i driver.",
-            backends.join(", ")
+            "Supporto GPU incluso ({}), ma nessuna scheda video utilizzabile: {}.",
+            backends.join(", "),
+            device::gpu_driver_hint()
         );
     }
     if let Ok(resolved) = Device::Auto.resolve(device::list_gpus()) {
@@ -397,6 +551,9 @@ fn list_devices() {
 }
 
 fn list_models() -> Result<()> {
+    if let Some(data) = paths::portable_data_dir() {
+        println!("Modalità portable: impostazioni e modelli in {}", data.display());
+    }
     println!("Cartella dei modelli: {}", models::models_dir()?.display());
     for info in models::MODELS {
         let mut line = format!(

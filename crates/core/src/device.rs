@@ -1,7 +1,8 @@
 //! Scelta del dispositivo di calcolo: processore (CPU) o scheda video (GPU).
 //!
 //! Le schede video sono quelle viste dai backend GPU compilati in whisper.cpp:
-//! con la feature `vulkan` funzionano schede AMD, NVIDIA e Intel; con `cuda` solo NVIDIA.
+//! con la feature `vulkan` funzionano schede AMD, NVIDIA e Intel; con `cuda` solo NVIDIA;
+//! con `metal` la GPU dei Mac Apple Silicon.
 
 use std::fmt;
 use std::str::FromStr;
@@ -29,6 +30,7 @@ pub enum Vendor {
     Amd,
     Nvidia,
     Intel,
+    Apple,
     Other,
 }
 
@@ -41,6 +43,8 @@ impl Vendor {
             Vendor::Nvidia
         } else if d.contains("intel") {
             Vendor::Intel
+        } else if d.contains("apple") {
+            Vendor::Apple
         } else {
             Vendor::Other
         }
@@ -52,6 +56,7 @@ impl Vendor {
             Vendor::Amd => "AMD",
             Vendor::Nvidia => "NVIDIA",
             Vendor::Intel => "Intel",
+            Vendor::Apple => "Apple",
             Vendor::Other => "",
         }
     }
@@ -184,7 +189,28 @@ pub fn compiled_gpu_backends() -> Vec<&'static str> {
     if cfg!(feature = "cuda") {
         backends.push("CUDA");
     }
+    if cfg!(feature = "metal") {
+        backends.push("Metal");
+    }
     backends
+}
+
+/// Consiglio da mostrare quando il supporto GPU è incluso ma non c'è nessuna scheda video
+/// utilizzabile (frase senza punto finale).
+pub fn gpu_driver_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        // Su macOS non ci sono driver da installare: Metal manca solo in casi particolari.
+        return "Metal non è disponibile su questo Mac (ad esempio in una macchina virtuale)";
+    }
+    match crate::vulkan::status() {
+        crate::vulkan::LoaderStatus::Disabled => {
+            "Vulkan è disattivato dalla variabile d'ambiente TRASCRITTORE_NO_VULKAN"
+        }
+        crate::vulkan::LoaderStatus::Missing => {
+            "Vulkan non è installato su questo computer (manca vulkan-1.dll): installa o aggiorna i driver della scheda video"
+        }
+        _ => "aggiorna i driver della scheda video",
+    }
 }
 
 /// Schede video utilizzabili. L'elenco viene calcolato una sola volta per esecuzione,
@@ -349,6 +375,25 @@ mod tests {
             "Scheda video: NVIDIA GeForce RTX 4070 (16 GB di memoria, Vulkan)"
         );
         assert_eq!(Vendor::detect("AMD Radeon RX 6800 XT"), Vendor::Amd);
+    }
+
+    #[test]
+    fn apple_silicon_gpu_label() {
+        // Metal riporta il nome del chip come descrizione e «Metal» come backend.
+        let g = GpuInfo {
+            index: 0,
+            backend: "Metal".into(),
+            description: "Apple M2 Pro".into(),
+            vendor: Vendor::detect("Apple M2 Pro"),
+            memory_bytes: 11 * 1024 * 1024 * 1024,
+            integrated: false,
+        };
+        assert_eq!(g.vendor, Vendor::Apple);
+        assert_eq!(g.label(), "Scheda video: Apple M2 Pro (11 GB di memoria, Metal)");
+        match Device::Auto.resolve(std::slice::from_ref(&g)).unwrap() {
+            ResolvedDevice::Gpu(chosen) => assert_eq!(chosen.description, "Apple M2 Pro"),
+            other => panic!("atteso GPU, ottenuto {other:?}"),
+        }
     }
 
     #[test]

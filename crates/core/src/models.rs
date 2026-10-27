@@ -1,5 +1,6 @@
 //! Catalogo dei modelli Whisper ufficiali (formato GGML di whisper.cpp) e loro download.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -121,15 +122,19 @@ pub fn find(id: &str) -> Option<&'static ModelInfo> {
 
 /// Cartella in cui sono conservati i modelli (creata se manca).
 ///
-/// Windows: `%LOCALAPPDATA%\Trascrittore\data\models`; Linux: `~/.local/share/trascrittore/models`;
-/// macOS: `~/Library/Application Support/Trascrittore/models`.
+/// In ordine di priorità: la variabile d'ambiente [`MODELS_DIR_ENV`]; in modalità portable
+/// `dati\modelli` accanto al programma (vedi [`crate::paths`]); altrimenti, su Windows,
+/// `%LOCALAPPDATA%\Trascrittore\data\models` (Linux: `~/.local/share/trascrittore/models`;
+/// macOS: `~/Library/Application Support/Trascrittore/models`).
 pub fn models_dir() -> Result<PathBuf> {
-    let dir = match std::env::var_os(MODELS_DIR_ENV) {
+    models_dir_for(std::env::var_os(MODELS_DIR_ENV), crate::paths::portable_data_dir())
+}
+
+/// Come [`models_dir`], con il valore della variabile d'ambiente e la cartella portable indicati.
+fn models_dir_for(env: Option<OsString>, portable: Option<&Path>) -> Result<PathBuf> {
+    let dir = match env {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => directories::ProjectDirs::from("", "", crate::APP_NAME)
-            .ok_or_else(|| anyhow!("Impossibile determinare la cartella dei dati utente."))?
-            .data_local_dir()
-            .join("models"),
+        _ => crate::paths::default_models_dir_for(portable)?,
     };
     fs::create_dir_all(&dir).with_context(|| {
         format!(
@@ -160,11 +165,25 @@ pub fn format_size(bytes: u64) -> String {
 /// `progress` riceve i byte scaricati e, se noto, il totale.
 pub fn download(
     model: &ModelInfo,
-    mut progress: impl FnMut(u64, Option<u64>),
+    progress: impl FnMut(u64, Option<u64>),
     cancel: &AtomicBool,
 ) -> Result<PathBuf> {
     let dest = model.path()?;
-    let partial = dest.with_extension("bin.part");
+    download_url(&model.url(), &dest, progress, cancel)?;
+    Ok(dest)
+}
+
+/// Scarica `url` in `dest`, passando per un file `.part` rinominato solo a download
+/// completato. Usata anche per i componenti di OpenVINO.
+pub fn download_url(
+    url: &str,
+    dest: &Path,
+    mut progress: impl FnMut(u64, Option<u64>),
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let mut partial = dest.as_os_str().to_owned();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(30)))
@@ -174,9 +193,9 @@ pub fn download(
         .into();
 
     let mut response = agent
-        .get(&model.url())
+        .get(url)
         .call()
-        .map_err(|e| anyhow!("Download del modello non riuscito: {e}. Controlla la connessione a Internet."))?;
+        .map_err(|e| anyhow!("Download non riuscito: {e}. Controlla la connessione a Internet."))?;
     let total = response.body().content_length();
 
     let mut reader = response.body_mut().as_reader();
@@ -197,7 +216,7 @@ pub fn download(
                 break;
             }
             file.write_all(&buffer[..n])
-                .context("Errore di scrittura del modello su disco.")?;
+                .context("Errore di scrittura su disco: controlla lo spazio libero.")?;
             downloaded += n as u64;
             progress(downloaded, total);
         }
@@ -208,7 +227,7 @@ pub fn download(
             }
         }
         if downloaded < 1_000_000 {
-            bail!("Il file scaricato è troppo piccolo per essere un modello valido.");
+            bail!("Il file scaricato è troppo piccolo: il server non ha inviato il file atteso.");
         }
         Ok(())
     })();
@@ -218,10 +237,8 @@ pub fn download(
         let _ = fs::remove_file(&partial);
         return Err(e);
     }
-    fs::rename(&partial, &dest).with_context(|| {
-        format!("Impossibile salvare il modello in «{}».", dest.display())
-    })?;
-    Ok(dest)
+    fs::rename(&partial, dest)
+        .with_context(|| format!("Impossibile salvare il file in «{}».", dest.display()))
 }
 
 /// Verifica che un file esista e abbia l'aspetto di un modello GGML.
@@ -258,5 +275,29 @@ mod tests {
     fn sizes_in_italian() {
         assert_eq!(format_size(574_000_000), "574 MB");
         assert_eq!(format_size(1_620_000_000), "1,6 GB");
+    }
+
+    #[test]
+    fn portable_models_dir_is_created_in_data_folder() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        fs::write(exe_dir.path().join(crate::paths::PORTABLE_MARKER), "").unwrap();
+        let data = crate::paths::portable_data_dir_in(exe_dir.path()).unwrap();
+
+        let dir = models_dir_for(None, Some(&data)).unwrap();
+        assert_eq!(dir, exe_dir.path().join("dati").join("modelli"));
+        assert!(dir.is_dir());
+        // Una variabile vuota equivale a nessuna variabile.
+        assert_eq!(models_dir_for(Some(OsString::new()), Some(&data)).unwrap(), dir);
+    }
+
+    #[test]
+    fn env_variable_wins_over_portable_mode() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let data = exe_dir.path().join("dati");
+        let custom = exe_dir.path().join("altri-modelli");
+        let dir = models_dir_for(Some(custom.clone().into_os_string()), Some(&data)).unwrap();
+        assert_eq!(dir, custom);
+        assert!(dir.is_dir());
+        assert!(!data.exists());
     }
 }

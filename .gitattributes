@@ -1,0 +1,3 @@
+# Gli script per macOS devono avere a capo LF anche se il progetto viene estratto su Windows:
+# con CRLF bash si ferma con «$'\r': command not found».
+*.sh text eol=lf

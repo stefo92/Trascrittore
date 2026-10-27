@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::audio;
 use crate::device::{self, Device, ResolvedDevice};
-use crate::transcriber::{EngineOptions, TranscribeOptions, Transcriber};
+use crate::transcriber::{EngineOptions, OpenVinoUse, TranscribeOptions, Transcriber};
 use crate::transcript::Transcript;
 
 /// Avanzamento di una trascrizione.
@@ -42,6 +42,8 @@ pub struct Outcome {
     pub device: ResolvedDevice,
     /// Presente se la scheda video richiesta non è stata usata.
     pub gpu_warning: Option<String>,
+    /// Presente se era richiesto l'encoder OpenVINO.
+    pub openvino: Option<OpenVinoUse>,
 }
 
 /// Esegue decodifica e trascrizione.
@@ -67,17 +69,19 @@ pub fn run(
 
     let report = Arc::clone(&progress);
     report(Progress::Transcribing(0));
-    let mut transcript = transcriber.transcribe(
+    let transcription = transcriber.transcribe(
         &audio.samples,
         &job.options,
         move |percent| report(Progress::Transcribing(percent.clamp(0, 100))),
         cancel,
     )?;
+    let mut transcript = transcription.transcript;
     transcript.audio_duration_ms = audio.duration_ms();
     Ok(Outcome {
         transcript,
         device: transcriber.device().clone(),
         gpu_warning: transcriber.gpu_warning().map(str::to_string),
+        openvino: transcription.openvino,
     })
 }
 

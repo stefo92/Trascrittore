@@ -36,9 +36,12 @@ use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::models::{self, ModelInfo};
 use trascrittore_core::pipeline::{self, Job, Outcome, Progress, ProgressFn};
 use trascrittore_core::settings::Settings;
-use trascrittore_core::transcriber::{self, EngineOptions, TranscribeOptions, Transcriber};
+use trascrittore_core::openvino;
+use trascrittore_core::transcriber::{
+    self, EngineOptions, OpenVinoEncoder, OpenVinoUse, TranscribeOptions, Transcriber,
+};
 use trascrittore_core::transcript::{format_duration_words, Transcript};
-use trascrittore_core::{audio, is_cancelled, languages};
+use trascrittore_core::{audio, is_cancelled, languages, paths};
 
 use crate::a11y::{self, Annotator};
 use crate::dialogs::{self, Filter};
@@ -61,6 +64,8 @@ const IDC_EXPORT: u16 = 119;
 const IDC_DEVICE: u16 = 120;
 const IDC_USE_GPU: u16 = 121;
 const IDC_FAST: u16 = 122;
+const IDC_OPENVINO: u16 = 123;
+const IDC_OV_INSTALL: u16 = 124;
 
 // Identificativi dei comandi di menu.
 const IDM_OPEN: u16 = 201;
@@ -73,6 +78,7 @@ const IDM_CUSTOM_MODEL: u16 = 214;
 const IDM_MODELS_DIR: u16 = 215;
 const IDM_STATUS: u16 = 216;
 const IDM_FLASH: u16 = 217;
+const IDM_OV_INSTALL: u16 = 218;
 const IDM_COPY: u16 = 221;
 const IDM_ZOOM_IN: u16 = 222;
 const IDM_ZOOM_OUT: u16 = 223;
@@ -98,6 +104,11 @@ const HELP_TEXT: &str = "Uso di Trascrittore\n\n\
    «Scheda video» (Alt+H) sceglie quale usare. «Modalità rapida» (Alt+P) accelera ancora\n\
    sulla scheda video, con qualche errore in più. Flash Attention (menu Trascrizione) è\n\
    disattivata: su alcune schede video accelera, su altre rallenta.\n\
+   Con un acceleratore neurale (NPU) o una scheda video Intel puoi eseguire l'encoder con\n\
+   OpenVINO. La casella «OpenVINO (Intel)» si raggiunge con Tab dopo «Scheda video»: se\n\
+   OpenVINO non è installato, subito dopo c'è il pulsante «Installa OpenVINO» (anche nel\n\
+   menu Trascrizione). Poi scegli il dispositivo nella casella e un modello Base, Small,\n\
+   Medium o Large v3.\n\
 3. Premi F5 per avviare la trascrizione. Esc la annulla.\n\
 4. Al termine il cursore si sposta sul testo trascritto: puoi leggerlo e correggerlo.\n\
 5. Scegli il formato e premi Ctrl+S per esportare.\n\n\
@@ -116,6 +127,9 @@ F1: questa guida";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Downloading,
+    DownloadingRuntime,
+    DownloadingEncoder,
+    Extracting,
     Decoding,
     LoadingModel,
     Transcribing,
@@ -125,6 +139,9 @@ impl Phase {
     fn description(self) -> &'static str {
         match self {
             Phase::Downloading => "Download del modello in corso",
+            Phase::DownloadingRuntime => "Download di OpenVINO in corso",
+            Phase::DownloadingEncoder => "Download dell'encoder OpenVINO in corso",
+            Phase::Extracting => "Estrazione dei file in corso",
             Phase::Decoding => "Decodifica dell'audio in corso",
             Phase::LoadingModel => "Caricamento del modello in memoria",
             Phase::Transcribing => "Trascrizione in corso",
@@ -134,10 +151,15 @@ impl Phase {
 
 /// Eventi dal thread di lavoro all'interfaccia.
 enum WorkerEvent {
-    Downloading(u32),
+    /// Avanzamento di un download (modello, runtime o encoder OpenVINO).
+    Downloading(Phase, u32),
+    /// Download finito, estrazione dei file in corso.
+    Extracting,
     Pipeline(Progress),
     Transcribed(Outcome),
     DownloadFinished,
+    /// OpenVINO installato; `restart` se verrà attivato al prossimo avvio.
+    OpenVinoInstalled { restart: bool },
     Failed(String),
     Cancelled,
 }
@@ -201,6 +223,9 @@ struct Controls {
     use_gpu: HWND,
     device_label: HWND,
     device: HWND,
+    ov_label: HWND,
+    ov: HWND,
+    ov_install: HWND,
     translate: HWND,
     timestamps: HWND,
     fast: HWND,
@@ -235,6 +260,9 @@ struct App {
     last_milestone: Cell<u32>,
     started: Cell<Option<Instant>>,
     gpu_warning_shown: Cell<bool>,
+    openvino_warning_shown: Cell<bool>,
+    /// Dispositivi OpenVINO elencati nella casella (dalla seconda voce in poi).
+    ov_devices: RefCell<Vec<openvino::Device>>,
     status: RefCell<String>,
     last_focus: Cell<HWND>,
     cancel_flag: RefCell<Arc<AtomicBool>>,
@@ -363,6 +391,7 @@ unsafe fn create_menu() -> Result<HMENU> {
     AppendMenuW(job, MF_STRING, IDM_MODELS_DIR as usize, w!("Apri la &cartella dei modelli"))?;
     AppendMenuW(job, MF_SEPARATOR, 0, PCWSTR::null())?;
     AppendMenuW(job, MF_STRING, IDM_FLASH as usize, w!("Accelerazione &Flash Attention"))?;
+    AppendMenuW(job, MF_STRING, IDM_OV_INSTALL as usize, w!("&Installa OpenVINO (Intel)..."))?;
     AppendMenuW(job, MF_SEPARATOR, 0, PCWSTR::null())?;
     AppendMenuW(job, MF_STRING, IDM_STATUS as usize, w!("Leggi lo s&tato\tF2"))?;
     AppendMenuW(bar, MF_POPUP, job.0 as usize, w!("&Trascrizione"))?;
@@ -492,6 +521,12 @@ impl App {
         let use_gpu = button("Usa la s&cheda video (GPU)", IDC_USE_GPU, BS_AUTOCHECKBOX)?;
         let device_label = label("Sc&heda video:")?;
         let device = combo(IDC_DEVICE)?;
+        // Nessuna lettera di scelta rapida libera: si raggiunge con Tab dopo «Scheda video».
+        let ov_label = label("OpenVINO (Intel):")?;
+        let ov = combo(IDC_OPENVINO)?;
+        // Subito dopo la casella nell'ordine di tabulazione: si vede (e si raggiunge) solo
+        // finché OpenVINO non è installato.
+        let ov_install = button("Installa OpenVINO...", IDC_OV_INSTALL, BS_PUSHBUTTON)?;
         let translate = button("Traduci in &inglese", IDC_TRANSLATE, BS_AUTOCHECKBOX)?;
         let timestamps = button("Includi time&stamp", IDC_TIMESTAMPS, BS_AUTOCHECKBOX)?;
         let fast = button("Modalità ra&pida (meno precisa)", IDC_FAST, BS_AUTOCHECKBOX)?;
@@ -541,6 +576,14 @@ impl App {
         annotator.set_name(lang, "Lingua");
         annotator.set_description(use_gpu, &gpu_availability_text());
         annotator.set_name(device, "Scheda video");
+        annotator.set_name(ov, "Encoder su OpenVINO (Intel)");
+        annotator.set_description(
+            ov_install,
+            &format!(
+                "Scarica OpenVINO dal sito di Intel, circa {}. Serve per gli acceleratori neurali (NPU) e le schede video Intel.",
+                models::format_size(openvino::RUNTIME_DOWNLOAD_BYTES)
+            ),
+        );
         annotator.set_description(
             fast,
             "Sulla scheda video è fino a due volte più veloce, con qualche errore in più nel testo; sul processore il guadagno è minimo.",
@@ -578,6 +621,9 @@ impl App {
                 use_gpu,
                 device_label,
                 device,
+                ov_label,
+                ov,
+                ov_install,
                 translate,
                 timestamps,
                 fast,
@@ -606,6 +652,8 @@ impl App {
             last_milestone: Cell::new(0),
             started: Cell::new(None),
             gpu_warning_shown: Cell::new(false),
+            openvino_warning_shown: Cell::new(false),
+            ov_devices: RefCell::new(Vec::new()),
             status: RefCell::new("Pronto.".to_string()),
             last_focus: Cell::new(browse),
             cancel_flag: RefCell::new(Arc::new(AtomicBool::new(false))),
@@ -615,7 +663,7 @@ impl App {
         })
     }
 
-    fn all_controls(&self) -> [HWND; 24] {
+    fn all_controls(&self) -> [HWND; 27] {
         let c = &self.c;
         [
             c.audio_label,
@@ -628,6 +676,9 @@ impl App {
             c.use_gpu,
             c.device_label,
             c.device,
+            c.ov_label,
+            c.ov,
+            c.ov_install,
             c.translate,
             c.timestamps,
             c.fast,
@@ -667,6 +718,7 @@ impl App {
         win::set_checked(self.c.use_gpu, settings.device != Device::Cpu && !gpus.is_empty());
         self.fill_device_combo(settings.device);
         self.update_device_enabled();
+        self.fill_openvino_combo(settings.openvino_device.as_deref());
 
         for format in ExportFormat::ALL {
             win::combo_add(self.c.format, format.label());
@@ -682,7 +734,17 @@ impl App {
         win::set_checked(self.c.fast, settings.fast_mode);
         self.update_flash_menu(settings.flash_attention);
         // Stato iniziale: dice subito se si userà la scheda video (leggibile con F2).
-        self.set_status(&format!("Pronto. {}", self.device_summary()), false);
+        let mut status = format!("Pronto. {}", self.device_summary());
+        if let Some(device) = self.selected_openvino() {
+            status.push_str(&format!(" L'encoder userà OpenVINO su {}.", device.label()));
+        } else if !openvino::runtime_installed()
+            && device::list_gpus().iter().any(|g| g.vendor == device::Vendor::Intel)
+        {
+            status.push_str(
+                " C'è una scheda video Intel: con il pulsante «Installa OpenVINO», dopo la casella OpenVINO, puoi usarla anche con OpenVINO.",
+            );
+        }
+        self.set_status(&status, false);
 
         self.set_idle_state();
         self.layout();
@@ -830,6 +892,130 @@ impl App {
         self.set_status(&self.device_summary(), true);
     }
 
+    /// Voci: «Non usare» e i dispositivi OpenVINO; se OpenVINO manca lo dice la voce stessa e
+    /// compare il pulsante «Installa OpenVINO» subito dopo la casella.
+    fn fill_openvino_combo(&self, selected: Option<&str>) {
+        let status = openvino::status();
+        let ready = matches!(status, openvino::RuntimeStatus::Ready { .. });
+        let (first, description, devices) = match status {
+            openvino::RuntimeStatus::NotInstalled => (
+                "Non usare: OpenVINO non è installato, usa il pulsante Installa OpenVINO",
+                "Per eseguire l'encoder su un acceleratore neurale (NPU) o su una scheda video Intel premi il pulsante «Installa OpenVINO», subito dopo questa casella.".to_string(),
+                Vec::new(),
+            ),
+            openvino::RuntimeStatus::Unavailable(error) => (
+                "Non usare: OpenVINO non è utilizzabile, prova a reinstallarlo",
+                format!(
+                    "OpenVINO non è utilizzabile: {error}. Il pulsante «Installa OpenVINO», subito dopo questa casella, lo reinstalla."
+                ),
+                Vec::new(),
+            ),
+            openvino::RuntimeStatus::Ready { devices, .. } => (
+                "Non usare",
+                "Esegue l'encoder di Whisper con OpenVINO: su un acceleratore neurale (NPU) o una scheda video Intel, oppure sul processore. Serve un encoder per il modello: base, small, medium o large-v3, anche compressi.".to_string(),
+                devices,
+            ),
+        };
+        win::combo_reset(self.c.ov);
+        win::combo_add(self.c.ov, first);
+        for device in &devices {
+            win::combo_add(self.c.ov, &device.label());
+        }
+        let index = selected
+            .and_then(|id| devices.iter().position(|d| d.id.eq_ignore_ascii_case(id)))
+            .map_or(0, |i| i + 1);
+        win::combo_select(self.c.ov, index);
+        Annotator::new().set_description(self.c.ov, &description);
+
+        // Il pulsante serve solo finché OpenVINO non è pronto; nascosto esce anche dal Tab.
+        *self.ov_devices.borrow_mut() = devices;
+        if win::is_shown(self.c.ov_install) == ready {
+            if ready && unsafe { GetFocus() } == self.c.ov_install {
+                self.focus(self.c.ov);
+            }
+            unsafe {
+                let _ = ShowWindow(self.c.ov_install, if ready { SW_HIDE } else { SW_SHOW });
+            }
+            self.layout();
+        }
+    }
+
+    /// Avviso se con OpenVINO attivo il modello scelto non ha un encoder disponibile.
+    fn openvino_model_hint(&self) -> Option<String> {
+        self.selected_openvino()?;
+        let (model_path, name) = match self.selected_model()? {
+            ModelChoice::Catalog(info) => (info.path().ok()?, info.description.to_string()),
+            ModelChoice::Custom(path) => {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                (path, name)
+            }
+        };
+        if openvino::find_encoder(&model_path).is_some()
+            || openvino::package_for_model(&model_path).is_some()
+        {
+            return None;
+        }
+        Some(format!(
+            "Il modello «{name}» non ha un encoder OpenVINO già pronto: per usare OpenVINO scegli Base, Small, Medium o Large v3, anche compressi."
+        ))
+    }
+
+    fn on_openvino_changed(&self) {
+        let device = self.selected_openvino();
+        self.settings.borrow_mut().openvino_device = device.as_ref().map(|d| d.id.clone());
+        let mut message = match &device {
+            Some(device) => format!("L'encoder userà OpenVINO su {}.", device.label()),
+            None => "OpenVINO non verrà usato.".to_string(),
+        };
+        // Si annuncia solo il problema: la voce scelta la legge già lo screen reader.
+        let hint = self.openvino_model_hint();
+        if let Some(hint) = &hint {
+            message.push(' ');
+            message.push_str(hint);
+        }
+        self.set_status(&message, hint.is_some());
+    }
+
+    fn selected_openvino(&self) -> Option<openvino::Device> {
+        let index = win::combo_selected(self.c.ov)?.checked_sub(1)?;
+        self.ov_devices.borrow().get(index).cloned()
+    }
+
+    fn install_openvino(&self) {
+        if openvino::runtime_installed()
+            && !self.confirm(
+                "OpenVINO è già installato. Vuoi scaricarlo e installarlo di nuovo? Se è in uso, la nuova copia verrà attivata al prossimo avvio.",
+            )
+        {
+            return;
+        }
+        if !self.confirm(&format!(
+            "Vuoi scaricare e installare OpenVINO {} di Intel? Dimensione: circa {}. Serve solo per gli acceleratori neurali (NPU) e le schede video Intel.",
+            openvino::RUNTIME_VERSION,
+            models::format_size(openvino::RUNTIME_DOWNLOAD_BYTES)
+        )) {
+            return;
+        }
+        let cancel = self.begin_busy();
+        let notifier = self.notifier();
+        std::thread::spawn(move || {
+            let result = openvino::install_runtime(
+                download_progress(&notifier, Phase::DownloadingRuntime),
+                &cancel,
+            );
+            match result {
+                Ok(openvino::InstallOutcome::Installed(_)) => {
+                    notifier.send(WorkerEvent::OpenVinoInstalled { restart: false })
+                }
+                Ok(openvino::InstallOutcome::AfterRestart(_)) => {
+                    notifier.send(WorkerEvent::OpenVinoInstalled { restart: true })
+                }
+                Err(e) if is_cancelled(&e) => notifier.send(WorkerEvent::Cancelled),
+                Err(e) => notifier.send(WorkerEvent::Failed(format!("{e:#}"))),
+            }
+        });
+    }
+
     fn update_flash_menu(&self, enabled: bool) {
         let state = if enabled { MF_CHECKED } else { MF_UNCHECKED };
         unsafe {
@@ -968,7 +1154,14 @@ impl App {
             IDC_TRANSLATE if code == BN_CLICKED => {
                 self.settings.borrow_mut().translate = win::is_checked(self.c.translate);
             }
-            IDC_MODEL if code == CBN_SELCHANGE => self.remember_model_choice(),
+            IDC_MODEL if code == CBN_SELCHANGE => {
+                self.remember_model_choice();
+                // Senza annuncio: scorrendo l'elenco con le frecce interromperebbe la lettura
+                // delle voci. Resta leggibile con F2 e F5 chiede comunque conferma.
+                if let Some(hint) = self.openvino_model_hint() {
+                    self.set_status(&hint, false);
+                }
+            }
             IDC_LANG if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().language = self.selected_language();
             }
@@ -980,6 +1173,9 @@ impl App {
                 self.settings.borrow_mut().fast_mode = win::is_checked(self.c.fast);
             }
             IDM_FLASH if !self.busy.get() => self.toggle_flash_attention(),
+            IDM_OV_INSTALL if !self.busy.get() => self.install_openvino(),
+            IDC_OPENVINO if code == CBN_SELCHANGE => self.on_openvino_changed(),
+            IDC_OV_INSTALL if code == BN_CLICKED && !self.busy.get() => self.install_openvino(),
             IDC_FORMAT if code == CBN_SELCHANGE => {
                 self.settings.borrow_mut().export_format = self.selected_format();
             }
@@ -1163,6 +1359,45 @@ impl App {
             ModelChoice::Custom(path) => (path.clone(), None),
         };
 
+        // Encoder OpenVINO: già presente, da scaricare (con conferma) oppure non disponibile.
+        let mut encoder_download = None;
+        let openvino = match self.selected_openvino() {
+            None => None,
+            Some(device) => {
+                let encoder = OpenVinoEncoder {
+                    encoder_path: PathBuf::new(),
+                    device: device.id.clone(),
+                    device_label: device.label(),
+                };
+                if let Some(path) = openvino::find_encoder(&model_path) {
+                    Some(OpenVinoEncoder {
+                        encoder_path: path,
+                        ..encoder
+                    })
+                } else if let Some(package) = openvino::package_for_model(&model_path) {
+                    if !self.confirm(&format!(
+                        "Per usare OpenVINO serve l'encoder del modello «{}», contenuto nel pacchetto ufficiale di Intel. Vuoi scaricarlo ora? Dimensione: circa {}. Il download avviene una sola volta.",
+                        package.family,
+                        models::format_size(package.size_bytes)
+                    )) {
+                        return;
+                    }
+                    let dir = model_path.parent().map(Path::to_path_buf).unwrap_or_default();
+                    encoder_download = Some((*package, dir.clone()));
+                    Some(OpenVinoEncoder {
+                        encoder_path: dir.join(package.encoder_file_name()),
+                        ..encoder
+                    })
+                } else if self.confirm(
+                    "Il modello scelto non ha un encoder OpenVINO già pronto: sono disponibili Base, Small, Medium e Large v3, anche compressi. Vuoi trascrivere senza OpenVINO?",
+                ) {
+                    None
+                } else {
+                    return;
+                }
+            }
+        };
+
         let translated = win::is_checked(self.c.translate);
         let options = TranscribeOptions {
             language: self.selected_language(),
@@ -1170,6 +1405,7 @@ impl App {
             threads: None,
             initial_prompt: None,
             fast: win::is_checked(self.c.fast),
+            openvino,
         };
         let job = Job {
             audio_path,
@@ -1191,6 +1427,19 @@ impl App {
             if let Some(info) = download {
                 if !download_with_progress(info, &notifier, &cancel) {
                     return;
+                }
+            }
+            if let Some((package, dir)) = encoder_download {
+                let result = openvino::download_encoder(
+                    &package,
+                    &dir,
+                    download_progress(&notifier, Phase::DownloadingEncoder),
+                    &cancel,
+                );
+                match result {
+                    Ok(_) => {}
+                    Err(e) if is_cancelled(&e) => return notifier.send(WorkerEvent::Cancelled),
+                    Err(e) => return notifier.send(WorkerEvent::Failed(format!("{e:#}"))),
                 }
             }
             let progress_notifier = notifier.clone();
@@ -1417,8 +1666,8 @@ impl App {
         } else {
             gpus.iter().map(|g| g.label()).collect::<Vec<_>>().join("\n")
         };
-        let text = format!(
-            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n{summary}\nFlash Attention: {flash}\n\nCartella dei modelli:\n{}",
+        let mut text = format!(
+            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n{summary}\nFlash Attention: {flash}\nOpenVINO (Intel): {openvino}\n\nCartella dei modelli:\n{}",
             trascrittore_core::APP_NAME,
             trascrittore_core::APP_VERSION,
             transcriber::engine_version(),
@@ -1431,7 +1680,21 @@ impl App {
             } else {
                 "disattivata"
             },
+            openvino = match openvino::status() {
+                openvino::RuntimeStatus::NotInstalled => "non installato".to_string(),
+                openvino::RuntimeStatus::Unavailable(e) => format!("non utilizzabile ({e})"),
+                openvino::RuntimeStatus::Ready { devices, .. } => {
+                    let labels: Vec<String> = devices.iter().map(|d| d.label()).collect();
+                    format!("installato; dispositivi: {}", labels.join("; "))
+                }
+            },
         );
+        if let Some(data) = paths::portable_data_dir() {
+            text.push_str(&format!(
+                "\n\nModalità portable: impostazioni e modelli nella cartella\n{}",
+                data.display()
+            ));
+        }
         win::message_box(Some(self.hwnd), &text, MB_OK | MB_ICONINFORMATION);
     }
 
@@ -1475,6 +1738,8 @@ impl App {
             self.c.lang,
             self.c.use_gpu,
             self.c.device,
+            self.c.ov,
+            self.c.ov_install,
             self.c.translate,
             self.c.timestamps,
             self.c.fast,
@@ -1496,6 +1761,8 @@ impl App {
             self.c.model,
             self.c.lang,
             self.c.use_gpu,
+            self.c.ov,
+            self.c.ov_install,
             self.c.translate,
             self.c.timestamps,
             self.c.fast,
@@ -1528,6 +1795,7 @@ impl App {
                 (IDM_DOWNLOAD, !busy),
                 (IDM_CUSTOM_MODEL, !busy),
                 (IDM_FLASH, !busy),
+                (IDM_OV_INSTALL, !busy),
             ] {
                 let _ = EnableMenuItem(self.menu, u32::from(id), MF_BYCOMMAND | state(enabled));
             }
@@ -1545,9 +1813,38 @@ impl App {
 
     fn handle_event(&self, event: WorkerEvent) {
         match event {
-            WorkerEvent::Downloading(percent) => {
-                self.enter_phase(Phase::Downloading);
-                self.show_progress(Phase::Downloading, percent);
+            WorkerEvent::Downloading(phase, percent) => {
+                self.enter_phase(phase);
+                self.show_progress(phase, percent);
+            }
+            WorkerEvent::Extracting => {
+                self.enter_phase(Phase::Extracting);
+                win::send(self.c.progress, PBM_SETPOS, 100, 0);
+            }
+            WorkerEvent::OpenVinoInstalled { restart: true } => {
+                self.end_busy(self.c.ov);
+                self.set_status(
+                    "La nuova versione di OpenVINO è pronta: verrà attivata al prossimo avvio di Trascrittore.",
+                    true,
+                );
+            }
+            WorkerEvent::OpenVinoInstalled { restart: false } => {
+                let selected = self.settings.borrow().openvino_device.clone();
+                self.fill_openvino_combo(selected.as_deref());
+                self.end_busy(self.c.ov);
+                let devices = self.ov_devices.borrow().clone();
+                let message = if devices.is_empty() {
+                    "OpenVINO è installato, ma non ha trovato dispositivi utilizzabili.".to_string()
+                } else if devices.iter().all(|d| d.kind() == "Processore") {
+                    "OpenVINO è installato. Su questo computer non ci sono acceleratori neurali né schede video Intel: è utilizzabile solo il processore.".to_string()
+                } else {
+                    let labels: Vec<String> = devices.iter().map(|d| d.label()).collect();
+                    format!(
+                        "OpenVINO è installato. Dispositivi disponibili: {}. Scegline uno nella casella OpenVINO.",
+                        labels.join("; ")
+                    )
+                };
+                self.set_status(&message, true);
             }
             WorkerEvent::Pipeline(Progress::Decoding(fraction)) => {
                 self.enter_phase(Phase::Decoding);
@@ -1598,7 +1895,13 @@ impl App {
         let text = format!("{}: {percent}%", phase.description());
         // Annuncio vocale solo ai traguardi del 25%, per non disturbare la lettura.
         let milestone = percent / 25 * 25;
-        let announce = matches!(phase, Phase::Downloading | Phase::Transcribing)
+        let announce = matches!(
+            phase,
+            Phase::Downloading
+                | Phase::DownloadingRuntime
+                | Phase::DownloadingEncoder
+                | Phase::Transcribing
+        )
             && milestone > self.last_milestone.get()
             && milestone < 100;
         if announce {
@@ -1612,6 +1915,7 @@ impl App {
             transcript,
             device,
             gpu_warning,
+            openvino,
         } = outcome;
         let elapsed = self
             .started
@@ -1653,11 +1957,31 @@ impl App {
             status.push(' ');
             status.push_str(warning);
         }
+        let openvino_warning = match &openvino {
+            Some(OpenVinoUse::Active { device_label }) => {
+                status.push_str(&format!(" Encoder eseguito con OpenVINO su {device_label}."));
+                None
+            }
+            Some(OpenVinoUse::Failed { reason }) => {
+                let warning = format!(
+                    "OpenVINO non si è attivato ({reason}): è stato usato l'encoder normale."
+                );
+                status.push(' ');
+                status.push_str(&warning);
+                Some(warning)
+            }
+            None => None,
+        };
         // Prima si sposta il focus sul testo, poi si annuncia l'esito.
         self.end_busy(self.c.text);
         self.set_status(&status, true);
         if let Some(warning) = gpu_warning {
             if !self.gpu_warning_shown.replace(true) {
+                win::message_box(Some(self.hwnd), &warning, MB_OK | MB_ICONWARNING);
+            }
+        }
+        if let Some(warning) = openvino_warning {
+            if !self.openvino_warning_shown.replace(true) {
                 win::message_box(Some(self.hwnd), &warning, MB_OK | MB_ICONWARNING);
             }
         }
@@ -1777,7 +2101,15 @@ impl App {
         let gap = self.px(8);
         let text_h = self.text_size("Ag").cy.max(self.px(14));
         let ctrl_h = text_h + self.px(10);
-        let label_w = ["File audio:", "Modello:", "Lingua:", "Scheda video:", "Avanzamento:", "Stato:"]
+        let label_w = [
+            "File audio:",
+            "Modello:",
+            "Lingua:",
+            "Scheda video:",
+            "OpenVINO (Intel):",
+            "Avanzamento:",
+            "Stato:",
+        ]
             .iter()
             .map(|l| self.text_size(l).cx)
             .max()
@@ -1814,6 +2146,16 @@ impl App {
 
         place(c.device_label, margin, label_y(y), label_w - gap, text_h);
         place(c.device, x1, y, field_w, ctrl_h * 8);
+        y += ctrl_h + gap;
+
+        place(c.ov_label, margin, label_y(y), label_w - gap, text_h);
+        if win::is_shown(c.ov_install) {
+            let install_w = button_w("Installa OpenVINO...");
+            place(c.ov, x1, y, field_w - install_w - gap, ctrl_h * 8);
+            place(c.ov_install, right - install_w, y, install_w, ctrl_h);
+        } else {
+            place(c.ov, x1, y, field_w, ctrl_h * 8);
+        }
         y += ctrl_h + gap;
 
         let translate_w = check_w("Traduci in inglese");
@@ -1863,6 +2205,25 @@ impl App {
     }
 }
 
+/// Inoltra l'avanzamento di un download a ogni punto percentuale; a download completato
+/// segnala l'estrazione dei file (per i pacchetti OpenVINO).
+fn download_progress(notifier: &Notifier, phase: Phase) -> impl FnMut(u64, Option<u64>) + '_ {
+    notifier.send(WorkerEvent::Downloading(phase, 0));
+    let mut last = 0u32;
+    move |done, total| {
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let percent = (done * 100 / total) as u32;
+            if percent != last {
+                last = percent;
+                notifier.send(WorkerEvent::Downloading(phase, percent));
+                if done >= total && phase != Phase::Downloading {
+                    notifier.send(WorkerEvent::Extracting);
+                }
+            }
+        }
+    }
+}
+
 /// Spiega se e perché la scheda video è disponibile.
 fn gpu_availability_text() -> String {
     let backends = device::compiled_gpu_backends();
@@ -1872,8 +2233,9 @@ fn gpu_availability_text() -> String {
             .to_string()
     } else if gpus.is_empty() {
         format!(
-            "Nessuna scheda video compatibile trovata ({}): aggiorna i driver della scheda video. Nel frattempo si usa il processore.",
-            backends.join(", ")
+            "Nessuna scheda video compatibile trovata ({}): {}. Nel frattempo si usa il processore.",
+            backends.join(", "),
+            device::gpu_driver_hint()
         )
     } else {
         let names: Vec<&str> = gpus.iter().map(|g| g.description.as_str()).collect();
@@ -1887,21 +2249,7 @@ fn gpu_availability_text() -> String {
 /// Scarica un modello inoltrando l'avanzamento; restituisce `false` in caso di errore o annullamento
 /// (l'evento corrispondente è già stato inviato).
 fn download_with_progress(info: &ModelInfo, notifier: &Notifier, cancel: &AtomicBool) -> bool {
-    notifier.send(WorkerEvent::Downloading(0));
-    let mut last = 0u32;
-    let result = models::download(
-        info,
-        |done, total| {
-            if let Some(total) = total.filter(|t| *t > 0) {
-                let percent = (done * 100 / total) as u32;
-                if percent != last {
-                    last = percent;
-                    notifier.send(WorkerEvent::Downloading(percent));
-                }
-            }
-        },
-        cancel,
-    );
+    let result = models::download(info, download_progress(notifier, Phase::Downloading), cancel);
     match result {
         Ok(_) => true,
         Err(e) if is_cancelled(&e) => {

@@ -29,6 +29,7 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 | RF-02 | Decodificare i formati audio comuni e convertirli in PCM mono 16 kHz (formato richiesto da Whisper). |
 | RF-03 | Trascrivere con Whisper in locale, scegliendo il modello (tiny, base, small, medium, large-v3-turbo, large-v3 e le loro varianti compresse, la più leggera di 32 MB) o un file modello personalizzato. |
 | RF-03b | Scegliere il dispositivo di calcolo: automatico, processore (CPU) o una specifica scheda video (AMD, NVIDIA, Intel). |
+| RF-03c | Eseguire l'encoder con OpenVINO su acceleratori neurali (NPU) e schede video Intel o sul processore, con installazione del runtime e download degli encoder dal programma. |
 | RF-04 | Scegliere la lingua del parlato o lasciarla rilevare automaticamente. |
 | RF-05 | Opzione "Traduci in inglese" (funzione nativa di Whisper). |
 | RF-06 | Mostrare l'avanzamento (percentuale e fase: decodifica, caricamento modello, trascrizione). |
@@ -112,6 +113,7 @@ trascrittore/
 | `audio` | Apertura del contenitore, decodifica di tutte le tracce in PCM, mixaggio in mono, ricampionamento a 16 kHz. |
 | `models` | Catalogo dei modelli ufficiali (nome, file, dimensione), cartella modelli, download con avanzamento e annullamento. |
 | `device` | Elenco delle schede video utilizzabili, scelta «Automatico / CPU / GPU n» e sua risoluzione. |
+| `openvino` | Caricamento dinamico dell'API C di OpenVINO, dispositivi Intel, encoder chiamato da whisper.cpp, installazione del runtime e degli encoder. |
 | `transcriber` | Caricamento del contesto Whisper, parametri (lingua, traduzione, thread), callback di avanzamento e annullamento, raccolta dei segmenti. |
 | `transcript` | Strutture `Segment`/`Transcript`, formattazione dei timestamp, conversione in testo. |
 | `document` | Modello neutro del documento da esportare. |
@@ -146,6 +148,7 @@ Motivazione: la grande maggioranza degli utenti ciechi su desktop usa Windows co
 | DOCX | `zip` + XML Office Open scritto a mano | Controllo totale su stili, intestazioni, lingua e metadati. |
 | HTML / TXT | libreria standard | Nessuna dipendenza necessaria. |
 | Download modelli | `ureq` 3 (rustls) | Client HTTP semplice e sincrono. |
+| OpenVINO | API C caricata con `libloading`, `sha2` per verificare il download | Nessuna dipendenza in compilazione; runtime C++ separati (Trascrittore usa /MT); compatibile con versioni diverse di OpenVINO perché non usa gli enum dei tipi. |
 | Percorsi utente | `directories` | Cartelle dati/configurazione standard per sistema. |
 | CLI | `clap` 4 | Parsing argomenti con aiuto generato. |
 
@@ -206,6 +209,8 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 ## 9. Gestione dei modelli
 
 - Cartella predefinita: `%LOCALAPPDATA%\Trascrittore\data\models` (equivalenti su Linux/macOS), modificabile con `TRASCRITTORE_MODELS_DIR`.
+  In modalità portable (cartella `dati` o file `portable.txt` accanto all'eseguibile) i modelli stanno in
+  `dati\modelli` e le impostazioni in `dati\impostazioni.json`.
 - Catalogo: tiny-q5_1 (32 MB, il più leggero), tiny (78 MB), base-q5_1 (60 MB), base (148 MB), small-q5_1 (190 MB), small (488 MB), medium-q5_0 (539 MB), medium (1,5 GB), large-v3-turbo-q5_0 (574 MB, **predefinito**: ottimo compromesso qualità/velocità), large-v3-turbo (1,6 GB), large-v3 (3,1 GB).
 - Sorgente: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-<nome>.bin`.
 - È sempre possibile scegliere un file `.bin` personalizzato.
@@ -252,6 +257,8 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 | Annunci non letti da alcuni screen reader | Doppio canale: notifiche UIA + spostamento del focus a fine lavoro + finestre di messaggio per gli errori + F2. |
 | Modelli grandi lenti su CPU | Predefinito large-v3-turbo quantizzato; feature GPU. |
 | Caratteri per il PDF | Uso dei caratteri di sistema (Arial/Segoe UI su Windows, DejaVu/Liberation su Linux) con percorso configurabile. |
+| OpenVINO non provato su NPU e GPU Intel | Integrazione verificata con il dispositivo CPU di OpenVINO (testo identico, encoder 28% più veloce); in caso di errore si torna all'encoder normale con un avviso, e un errore durante il lavoro ferma la trascrizione invece di produrre testo errato. |
+| Encoder OpenVINO non disponibili per tiny e large-v3-turbo | Pacchetti ufficiali Intel per base, small, medium e large-v3; per gli altri modelli la GUI propone di trascrivere senza OpenVINO e il README spiega la conversione. |
 | Annullamento lento | whisper.cpp controlla l'interruzione solo tra un blocco di codifica e l'altro: la GUI spiega l'attesa invece di sembrare bloccata. |
 | Bug di `set_abort_callback_safe` in whisper-rs 0.16.0 | Callback di interruzione impostata con l'API di basso livello e un trampolino proprio. |
 | File audio molto lunghi (memoria) | ~230 MB per un'ora di audio: accettabile; elaborazione a blocchi in fase futura. |

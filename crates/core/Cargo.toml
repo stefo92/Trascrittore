@@ -13,9 +13,10 @@ default = ["whisper"]
 # il resto del nucleo senza CMake/libclang.
 whisper = ["dep:whisper-rs"]
 # Schede video. Vulkan funziona con AMD, NVIDIA e Intel (richiede il Vulkan SDK per compilare);
-# CUDA solo con NVIDIA (richiede il CUDA Toolkit).
+# CUDA solo con NVIDIA (richiede il CUDA Toolkit); Metal con i Mac Apple Silicon (solo su macOS).
 vulkan = ["whisper", "whisper-rs/vulkan"]
 cuda = ["whisper", "whisper-rs/cuda"]
+metal = ["whisper", "whisper-rs/metal"]
 
 [dependencies]
 anyhow.workspace = true
@@ -33,6 +34,9 @@ zip = { version = "9.0", default-features = false, features = ["deflate"] }
 ureq = "3.4"
 directories = "6.0"
 chrono = "0.4"
+# OpenVINO (Intel) viene caricato solo se presente: nessuna dipendenza in fase di compilazione.
+libloading = "0.9"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

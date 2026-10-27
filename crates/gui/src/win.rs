@@ -5,9 +5,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowTextLengthW, GetWindowTextW, MessageBoxW, SendMessageW, SetWindowTextW, BM_GETCHECK,
-    BM_SETCHECK, CB_ADDSTRING, CB_ERR, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, MB_ICONERROR,
-    MB_OK, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE,
+    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, MessageBoxW, SendMessageW,
+    SetWindowTextW, BM_GETCHECK, BM_SETCHECK, CB_ADDSTRING, CB_ERR, CB_GETCURSEL, CB_RESETCONTENT,
+    CB_SETCURSEL, GWL_STYLE, MB_ICONERROR, MB_OK, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, WS_VISIBLE,
 };
 
 /// Titolo delle finestre di messaggio.
@@ -30,6 +30,13 @@ pub fn get_text(hwnd: HWND) -> String {
         let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
         String::from_utf16_lossy(&buffer[..copied])
     }
+}
+
+/// `true` se il controllo stesso ha lo stile WS_VISIBLE. A differenza di `IsWindowVisible`
+/// non dipende dalla finestra principale, che durante l'avvio non è ancora mostrata.
+pub fn is_shown(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    style & WS_VISIBLE.0 != 0
 }
 
 pub fn enable(hwnd: HWND, enabled: bool) {

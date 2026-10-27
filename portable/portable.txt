@@ -1,0 +1,3 @@
+Questo file attiva la modalità portable di Trascrittore: impostazioni e modelli vengono salvati nella cartella «dati» accanto al programma, non nel profilo dell'utente.
+
+Se elimini questo file e la cartella «dati», Trascrittore userà le cartelle del profilo dell'utente.
