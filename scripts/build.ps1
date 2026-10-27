@@ -105,6 +105,15 @@ if ($code -eq 0 -and $command -eq "build" -and ($cargoArgs -contains "--release"
         $source = Join-Path $targetDir "release\$exe"
         if (Test-Path $source) { Copy-Item $source $dist -Force }
     }
+    # Testi in UTF-8 con BOM e a capo CRLF, leggibili anche con il Blocco note di Windows meno recenti.
+    $utf8Bom = New-Object System.Text.UTF8Encoding $true
+    function Write-WindowsText([string]$source, [string]$dest) {
+        $text = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$source"))
+        $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
+        [System.IO.File]::WriteAllText($dest, $text, $utf8Bom)
+    }
+    # La GPL chiede di accompagnare gli eseguibili con il testo della licenza.
+    Write-WindowsText "LICENSE" (Join-Path $dist "LICENZA.txt")
     $kind = if ($gpu) { "con supporto per le schede video" } else { "solo processore" }
     Write-Output "Programmi pronti ($kind) in: $dist"
 
@@ -115,20 +124,19 @@ if ($code -eq 0 -and $command -eq "build" -and ($cargoArgs -contains "--release"
         $portable = Join-Path $dist "Trascrittore-portable"
         New-Item -ItemType Directory -Force (Join-Path $portable "dati\modelli") | Out-Null
         foreach ($exe in $exes) { Copy-Item $exe $portable -Force }
-        # Testi in UTF-8 con BOM e a capo CRLF, leggibili anche con il Blocco note di Windows meno recenti.
-        $utf8Bom = New-Object System.Text.UTF8Encoding $true
-        foreach ($name in "LEGGIMI.txt", "portable.txt") {
-            $text = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\portable\$name"))
-            $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
-            [System.IO.File]::WriteAllText((Join-Path $portable $name), $text, $utf8Bom)
+        $texts = [ordered]@{
+            "LEGGIMI.txt"  = "portable\LEGGIMI.txt"
+            "portable.txt" = "portable\portable.txt"
+            "LICENZA.txt"  = "LICENSE"
         }
+        foreach ($name in $texts.Keys) { Write-WindowsText $texts[$name] (Join-Path $portable $name) }
 
         $zipPath = Join-Path $dist "Trascrittore-portable.zip"
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
-            foreach ($name in "trascrittore.exe", "trascrittore-cli.exe", "LEGGIMI.txt", "portable.txt") {
+            foreach ($name in @("trascrittore.exe", "trascrittore-cli.exe") + @($texts.Keys)) {
                 [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
                     $zip, (Join-Path $portable $name), "Trascrittore-portable/$name",
                     [System.IO.Compression.CompressionLevel]::Optimal)

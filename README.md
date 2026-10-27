@@ -349,3 +349,23 @@ scripts/      compilazione (Windows e macOS), verifiche e audio di prova
 Il PDF incorpora un carattere di sistema (Arial o Segoe UI su Windows, DejaVu/Liberation/Noto su Linux,
 Arial su macOS). Per usarne un altro: variabili d'ambiente `TRASCRITTORE_PDF_FONT` e
 `TRASCRITTORE_PDF_FONT_BOLD` con il percorso dei file `.ttf`.
+
+## Licenza
+
+Copyright (C) 2026 nvrscurano
+
+Trascrittore è software libero: puoi ridistribuirlo e modificarlo secondo i termini della
+[GNU General Public License versione 3](LICENSE) (SPDX `GPL-3.0-only`), pubblicata dalla Free Software
+Foundation. È distribuito senza alcuna garanzia, neppure quella implicita di commerciabilità o di
+idoneità a un particolare scopo.
+
+- Le versioni portable e la cartella `dist\` contengono il testo della licenza come `LICENZA.txt`;
+  la finestra *Informazioni su Trascrittore* e `trascrittore-cli --help` mostrano gli avvisi legali.
+- Chi distribuisce gli eseguibili deve rendere disponibile anche il codice sorgente corrispondente
+  (sezione 6 della licenza), per esempio con un repository pubblico o uno zip dei sorgenti accanto
+  al programma.
+- Componenti di terze parti, tutti con licenze compatibili con la GPL 3.0: whisper.cpp e ggml (MIT),
+  symphonia (MPL 2.0) e le altre librerie Rust di `Cargo.lock` (MIT, Apache 2.0, BSD, ISC, Zlib,
+  Unlicense, Unicode). Il runtime di Visual C++, collegato staticamente, è una libreria di sistema ai
+  sensi della licenza. OpenVINO (Apache 2.0) e il caricatore Vulkan non sono inclusi: OpenVINO viene
+  scaricato dal sito di Intel insieme alle sue licenze.

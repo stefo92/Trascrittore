@@ -1695,6 +1695,8 @@ impl App {
                 data.display()
             ));
         }
+        text.push_str("\n\n");
+        text.push_str(trascrittore_core::LEGAL_NOTICE);
         win::message_box(Some(self.hwnd), &text, MB_OK | MB_ICONINFORMATION);
     }
 

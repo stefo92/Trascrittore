@@ -18,6 +18,7 @@ trascrittore-cli: il programma.
 dati: la cartella con le impostazioni e, nella sottocartella modelli, i modelli di trascrizione.
 portable.txt: attiva la modalità portable. Non eliminarlo.
 LEGGIMI.txt: questo file.
+LICENZA.txt: il testo della licenza GNU General Public License versione 3, in inglese.
 
 
 Primo avvio
@@ -69,7 +70,9 @@ macOS può conservare nella propria cartella temporanea una cache degli shader M
 
 Licenze
 
-Trascrittore è distribuito con licenza MIT.
+Copyright (C) 2026 nvrscurano
+
+Trascrittore è software libero: puoi ridistribuirlo e modificarlo secondo i termini della GNU General Public License versione 3, pubblicata dalla Free Software Foundation. Il testo della licenza è nel file LICENZA.txt e all'indirizzo https://www.gnu.org/licenses/gpl-3.0.html. Trascrittore è distribuito senza alcuna garanzia, neppure quella implicita di commerciabilità o di idoneità a un particolare scopo.
 
 Include whisper.cpp e ggml, con licenza MIT: Copyright (c) 2023-2024 The ggml authors. Il testo della licenza MIT è disponibile all'indirizzo https://opensource.org/license/mit.
 

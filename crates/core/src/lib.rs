@@ -24,6 +24,10 @@ pub const APP_NAME: &str = "Trascrittore";
 /// Versione dell'applicazione.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Avvisi legali che la GPL chiede di mostrare nelle interfacce interattive: copyright,
+/// assenza di garanzia, possibilità di ridistribuire e dove leggere la licenza.
+pub const LEGAL_NOTICE: &str = "Copyright (C) 2026 nvrscurano\n\nTrascrittore è software libero: puoi ridistribuirlo e modificarlo secondo i termini della GNU General Public License versione 3, pubblicata dalla Free Software Foundation. È distribuito senza alcuna garanzia, neppure quella implicita di commerciabilità o di idoneità a un particolare scopo. Il testo della licenza è nel file LICENZA.txt accanto al programma e all'indirizzo https://www.gnu.org/licenses/gpl-3.0.html.";
+
 /// Errore restituito quando l'utente annulla un'operazione.
 ///
 /// Si riconosce con `err.is::<Cancelled>()` su un [`anyhow::Error`], così l'annullamento

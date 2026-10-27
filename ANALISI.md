@@ -152,6 +152,10 @@ Motivazione: la grande maggioranza degli utenti ciechi su desktop usa Windows co
 | Percorsi utente | `directories` | Cartelle dati/configurazione standard per sistema. |
 | CLI | `clap` 4 | Parsing argomenti con aiuto generato. |
 
+Licenza del progetto: **GNU GPL versione 3** (`GPL-3.0-only`). Tutte le dipendenze hanno licenze
+compatibili (MIT, Apache 2.0, MPL 2.0, BSD, ISC, Zlib, Unlicense, Unicode); OpenVINO e il caricatore
+Vulkan non vengono distribuiti con il programma.
+
 ## 7. Progettazione dell'interfaccia
 
 ### 7.1 Disposizione e ordine di tabulazione

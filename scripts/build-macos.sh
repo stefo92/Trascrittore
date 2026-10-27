@@ -92,10 +92,13 @@ cp "$out/trascrittore-cli" "$portable/"
 codesign --force --sign - "$portable/trascrittore-cli"
 cp "$root/portable/LEGGIMI-macOS.txt" "$portable/LEGGIMI.txt"
 cp "$root/portable/portable.txt" "$portable/portable.txt"
+# La GPL chiede di accompagnare l'eseguibile con il testo della licenza.
+cp "$root/LICENSE" "$portable/LICENZA.txt"
 
 staging="$(mktemp -d)"
 mkdir -p "$staging/$name/dati/modelli"
-cp "$portable/trascrittore-cli" "$portable/LEGGIMI.txt" "$portable/portable.txt" "$staging/$name/"
+cp "$portable/trascrittore-cli" "$portable/LEGGIMI.txt" "$portable/portable.txt" \
+    "$portable/LICENZA.txt" "$staging/$name/"
 rm -f "$dist/$name.zip"
 # ditto conserva permessi di esecuzione e firma, come l'Utility Archivio di macOS.
 ditto -c -k --keepParent "$staging/$name" "$dist/$name.zip"

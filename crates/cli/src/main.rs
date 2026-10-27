@@ -28,7 +28,8 @@ trascrittore_core::vulkan_delay_load_hook!();
 #[command(
     name = "trascrittore-cli",
     version,
-    about = "Trascrive file audio in locale con Whisper ed esporta il testo in TXT, HTML, PDF o DOCX."
+    about = "Trascrive file audio in locale con Whisper ed esporta il testo in TXT, HTML, PDF o DOCX.",
+    after_help = trascrittore_core::LEGAL_NOTICE
 )]
 struct Cli {
     #[command(subcommand)]
