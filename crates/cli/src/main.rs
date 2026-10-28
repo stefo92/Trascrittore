@@ -17,10 +17,10 @@ use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::pipeline::{self, Job, Progress, ProgressFn};
 use trascrittore_core::openvino::{self, RuntimeStatus};
 use trascrittore_core::transcriber::{
-    self, EngineOptions, OpenVinoEncoder, OpenVinoUse, TranscribeOptions, Transcriber,
+    self, CoreMlUse, EngineOptions, OpenVinoEncoder, OpenVinoUse, TranscribeOptions, Transcriber,
 };
 use trascrittore_core::transcript::format_duration_words;
-use trascrittore_core::{is_cancelled, languages, models, paths};
+use trascrittore_core::{coreml, is_cancelled, languages, models, paths};
 
 trascrittore_core::vulkan_delay_load_hook!();
 
@@ -44,7 +44,8 @@ enum Command {
     /// Elenca i modelli Whisper e indica quelli già scaricati.
     #[command(visible_alias = "models")]
     Modelli,
-    /// Scarica un modello Whisper dal repository ufficiale.
+    /// Scarica un modello Whisper dal repository ufficiale (sui Mac anche il suo encoder per
+    /// il Neural Engine).
     #[command(visible_alias = "download")]
     Scarica {
         /// Nome del modello (vedi il comando «modelli»).
@@ -89,6 +90,11 @@ struct TranscribeArgs {
     /// (vedi il comando «openvino»). Con --scarica-modello scarica anche l'encoder se manca.
     #[arg(long, value_name = "DISPOSITIVO")]
     openvino: Option<String>,
+
+    /// Sui Mac non usa l'encoder Core ML (Neural Engine) anche se è presente. Senza questa
+    /// opzione viene usato quando c'è; con --scarica-modello viene scaricato se manca.
+    #[arg(long, alias = "no-coreml")]
+    senza_neural_engine: bool,
 
     /// Lingua parlata: codice ISO (es. it, en) oppure «auto» per il rilevamento automatico.
     #[arg(short, long, alias = "language", default_value = "auto")]
@@ -136,10 +142,13 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Trascrivi(args) => transcribe(args),
         Command::Modelli => list_models(),
-        Command::Scarica { modello } => {
-            let info = find_model(&modello);
-            info.and_then(|info| download_model(info, false).map(|_| ()))
-        }
+        Command::Scarica { modello } => find_model(&modello).and_then(|info| {
+            let path = download_model(info, false)?;
+            if coreml::compiled() {
+                ensure_coreml_encoder(&path, true, false)?;
+            }
+            Ok(())
+        }),
         Command::Lingue => {
             for lang in languages::LANGUAGES {
                 println!("{}\t{}", lang.code, lang.name);
@@ -188,6 +197,11 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
         )?),
         None => None,
     };
+    // Neural Engine: l'encoder Core ML si usa se c'è (scaricato con --scarica-modello).
+    let use_coreml = coreml::compiled()
+        && !args.senza_neural_engine
+        && openvino.is_none()
+        && ensure_coreml_encoder(&model_path, args.scarica_modello, args.silenzioso)?;
     if let Some(dir) = &args.uscita {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Impossibile creare la cartella «{}».", dir.display()))?;
@@ -203,6 +217,7 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
     };
     let engine = EngineOptions {
         flash_attention: args.flash_attention,
+        coreml: use_coreml,
     };
     let mut cache: Option<Transcriber> = None;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -242,6 +257,17 @@ fn transcribe(args: TranscribeArgs) -> Result<()> {
                 Some(OpenVinoUse::Failed { reason }) => {
                     eprintln!(
                         "Attenzione: OpenVINO non si è attivato ({reason}); è stato usato l'encoder normale."
+                    );
+                }
+                _ => {}
+            }
+            match &outcome.coreml {
+                Some(CoreMlUse::Active) if !args.silenzioso => {
+                    eprintln!("Encoder eseguito sul Neural Engine (Core ML).");
+                }
+                Some(CoreMlUse::Failed { reason }) => {
+                    eprintln!(
+                        "Attenzione: Core ML non si è attivato ({reason}); è stato usato l'encoder normale."
                     );
                 }
                 _ => {}
@@ -401,6 +427,39 @@ fn download_model(info: &models::ModelInfo, quiet: bool) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Verifica che accanto al modello ci sia l'encoder Core ML e, se richiesto, lo scarica.
+/// Restituisce `true` se l'encoder è disponibile.
+fn ensure_coreml_encoder(model_path: &Path, download: bool, quiet: bool) -> Result<bool> {
+    if coreml::find_encoder(model_path).is_some() {
+        return Ok(true);
+    }
+    let Some(package) = coreml::package_for_model(model_path) else {
+        return Ok(false);
+    };
+    if !download {
+        if !quiet {
+            eprintln!(
+                "Suggerimento: con l'encoder per il Neural Engine la trascrizione è più veloce. Scaricalo ({}) aggiungendo --scarica-modello.",
+                models::format_size(package.size_bytes)
+            );
+        }
+        return Ok(false);
+    }
+    if !quiet {
+        eprintln!(
+            "Download dell'encoder per il Neural Engine «{}» (circa {}) da {}",
+            package.encoder_dir_name(),
+            models::format_size(package.size_bytes),
+            package.url()
+        );
+    }
+    let dir = model_path.parent().unwrap_or(Path::new("."));
+    let cancel = AtomicBool::new(false);
+    let path = coreml::download_encoder(package, dir, download_printer(quiet), &cancel)?;
+    eprintln!("Encoder salvato in {}", path.display());
+    Ok(true)
+}
+
 /// Stampa l'avanzamento di un download a passi del 10%.
 fn download_printer(quiet: bool) -> impl FnMut(u64, Option<u64>) {
     let mut last_step = 0u64;
@@ -549,6 +608,11 @@ fn list_devices() {
     if let Ok(resolved) = Device::Auto.resolve(device::list_gpus()) {
         println!("Con «auto» verrà usato: {}.", resolved.label());
     }
+    if coreml::compiled() {
+        println!(
+            "Neural Engine (Core ML): incluso. L'encoder si esegue con Core ML quando accanto al modello c'è il suo encoder Core ML (vedi «modelli»)."
+        );
+    }
 }
 
 fn list_models() -> Result<()> {
@@ -565,6 +629,11 @@ fn list_models() -> Result<()> {
         );
         if info.is_downloaded() {
             line.push_str(" [scaricato]");
+        }
+        if coreml::compiled()
+            && info.path().ok().and_then(|p| coreml::find_encoder(&p)).is_some()
+        {
+            line.push_str(" [Neural Engine]");
         }
         if info.id == models::DEFAULT_MODEL_ID {
             line.push_str(" [predefinito]");

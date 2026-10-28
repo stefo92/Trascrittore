@@ -15,10 +15,20 @@ path = "src/main.rs"
 [features]
 vulkan = ["trascrittore-core/vulkan"]
 cuda = ["trascrittore-core/cuda"]
+metal = ["trascrittore-core/metal"]
+coreml = ["trascrittore-core/coreml"]
 
 [dependencies]
 trascrittore-core.workspace = true
 anyhow.workspace = true
+
+# Su macOS l'interfaccia usa i controlli nativi di AppKit, letti da VoiceOver.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+# NSSavePanel/NSOpenPanel con i tipi di file (UTType) richiedono la feature dedicata.
+objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = "0.3"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
