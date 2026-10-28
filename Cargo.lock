@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "trascrittore-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "trascrittore-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "trascrittore-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "embed-manifest",
