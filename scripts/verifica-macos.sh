@@ -1,14 +1,17 @@
 #!/bin/bash
 # Verifica la versione portable per macOS (dist/Trascrittore-portable-macos):
-# - l'eseguibile è arm64, ha una firma valida ed è collegato solo a librerie di sistema;
-# - copiato in una cartella temporanea, tiene modelli e dati nella sua cartella «dati»;
-# - trascrive con la GPU (Metal) e con il processore;
+# - gli eseguibili sono arm64, hanno una firma valida e sono collegati solo a librerie di sistema;
+# - copiata in una cartella temporanea, tiene modelli e dati nella sua cartella «dati»;
+# - la CLI trascrive con la GPU (Metal) e con il processore;
+# - l'interfaccia grafica (Trascrittore.app) espone a VoiceOver ruoli, nomi e ordine di
+#   tabulazione corretti, trascrive dalla finestra e al termine porta il focus sul testo;
 # - non scrive nulla nella Libreria dell'utente.
 #
 # Va eseguito su un Mac Apple Silicon dopo «bash scripts/build-macos.sh build --release».
 # Scarica il modello tiny-q5_1 (32 MB), a meno che TRASCRITTORE_MODELLO_PROVA indichi un file
 # .bin già presente. Senza GPU Metal (es. in una macchina virtuale) la prova sulla GPU viene
-# saltata, a meno che VERIFICA_GPU_OBBLIGATORIA=1.
+# saltata, a meno che VERIFICA_GPU_OBBLIGATORIA=1. La prova dell'interfaccia grafica richiede
+# una sessione grafica attiva; VERIFICA_GUI=0 la salta.
 #
 # Esempio:
 #   bash scripts/verifica-macos.sh
@@ -108,6 +111,50 @@ transcribe cpu --dispositivo cpu
 
 if [ -z "${TRASCRITTORE_MODELLO_PROVA:-}" ] && [ ! -f "$copy/dati/modelli/ggml-$model.bin" ]; then
     fail "il modello non è stato scaricato in dati/modelli"
+fi
+
+# Esegue un comando e lo interrompe se dura più di $1 secondi.
+with_timeout() {
+    local seconds="$1"
+    shift
+    "$@" &
+    local pid=$!
+    ( sleep "$seconds"; kill "$pid" 2>/dev/null ) &
+    local watcher=$!
+    local code=0
+    wait "$pid" || code=$?
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return $code
+}
+
+echo "=== Interfaccia grafica (Trascrittore.app)"
+app="$copy/Trascrittore.app"
+gui="$app/Contents/MacOS/trascrittore"
+if [ ! -x "$gui" ]; then
+    fail "manca Trascrittore.app nella versione portable"
+else
+    gui_archs="$(lipo -archs "$gui")"
+    [ "$gui_archs" = "arm64" ] || fail "architettura inattesa dell'interfaccia grafica: $gui_archs"
+    if codesign --verify --deep --strict "$app"; then
+        echo "Firma di Trascrittore.app valida"
+    else
+        fail "firma di Trascrittore.app non valida"
+    fi
+    plutil -lint -s "$app/Contents/Info.plist" || fail "Info.plist non valido"
+    gui_external="$(otool -L "$gui" | tail -n +2 | awk '{ print $1 }' \
+        | grep -v -E '^(/usr/lib/|/System/Library/)' || true)"
+    [ -z "$gui_external" ] || fail "librerie esterne a macOS nell'interfaccia grafica: $gui_external"
+    if [ "${VERIFICA_GUI:-1}" = "0" ]; then
+        echo "AVVISO: VERIFICA_GUI=0, salto la prova della finestra."
+    elif with_timeout 300 "$gui" --verifica-accessibilita --modello "$model" "$audio" \
+        > "$work/gui.txt" 2>&1; then
+        # L'albero completo è lungo: si mostrano l'ordine di tabulazione e l'esito.
+        sed -n '/^=== Ordine di tabulazione/,$p' "$work/gui.txt"
+    else
+        cat "$work/gui.txt"
+        fail "verifica dell'interfaccia grafica non riuscita"
+    fi
 fi
 
 echo "=== Scritture nella Libreria dell'utente"

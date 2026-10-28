@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Info.plist di Trascrittore.app. scripts/build-macos.sh sostituisce @VERSIONE@ e @MACOS_MINIMO@. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>it</string>
+	<!-- Solo italiano: anche i pannelli di sistema (Apri, Esporta, Annulla…) sono in italiano. -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>it</string>
+	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Trascrittore</string>
+	<key>CFBundleName</key>
+	<string>Trascrittore</string>
+	<key>CFBundleExecutable</key>
+	<string>trascrittore</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.stefo92.trascrittore</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSIONE@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSIONE@</string>
+	<key>CFBundleIconFile</key>
+	<string>Trascrittore</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@MACOS_MINIMO@</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright (C) 2026 nvrscurano. Software libero, licenza GNU GPL versione 3.</string>
+	<!-- «Apri con» e trascinamento sull'icona per i file audio e i contenitori audio/video. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>File audio</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.audio</string>
+				<string>public.audiovisual-content</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

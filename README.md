@@ -3,7 +3,8 @@
 Trascrittore converte file audio in testo **sul tuo computer**, con [Whisper](https://github.com/ggerganov/whisper.cpp)
 (implementazione whisper.cpp), ed esporta la trascrizione in **TXT, HTML, PDF e DOCX**.
 
-È progettato per essere usato con gli screen reader (NVDA, JAWS, Assistente vocale) e solo da tastiera.
+È progettato per essere usato con gli screen reader (NVDA, JAWS e Assistente vocale su Windows, VoiceOver
+su Mac) e solo da tastiera.
 L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
 
 ## Caratteristiche
@@ -22,9 +23,9 @@ L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
   - **DOCX** con stili *Titolo 1/Titolo 2* navigabili e lingua impostata;
   - **HTML5** semantico con attributo `lang`;
   - **TXT** UTF-8.
-- Interfaccia grafica Win32 nativa e interfaccia a riga di comando.
+- Interfaccia grafica nativa per Windows (Win32) e per Mac (AppKit), e interfaccia a riga di comando.
 
-## Uso dell'interfaccia grafica
+## Uso dell'interfaccia grafica (Windows)
 
 Avvia `trascrittore.exe` (puoi anche passare un file audio come argomento o usare «Apri con»).
 
@@ -187,8 +188,9 @@ nello zip.
 
 ## Versione portable per macOS (Apple Silicon)
 
-Su Mac c'è solo l'interfaccia a riga di comando (la GUI è Win32), utilizzabile con VoiceOver nel
-Terminale. Va compilata su un Mac Apple Silicon con Xcode Command Line Tools, CMake e Rust:
+Su Mac ci sono l'interfaccia grafica **Trascrittore.app**, accessibile con VoiceOver (vedi
+[sotto](#interfaccia-grafica-per-mac)), e l'interfaccia a riga di comando, utilizzabile con VoiceOver
+nel Terminale. Vanno compilate su un Mac Apple Silicon con Xcode Command Line Tools, CMake e Rust:
 
 ```bash
 xcode-select --install
@@ -208,27 +210,76 @@ bash scripts/build-macos.sh build --release
 
 Lo script compila per `aarch64-apple-darwin` con la GPU del Mac (**Metal**, feature
 `trascrittore-core/metal`; `--solo-cpu` per escluderla) e crea **`dist/Trascrittore-portable-macos`**
-e `dist/Trascrittore-portable-macos.zip` con `trascrittore-cli`, `LEGGIMI.txt` (sorgente in
-`portable/LEGGIMI-macOS.txt`), `portable.txt` e la cartella vuota `dati/modelli`. Accetta gli stessi
+e `dist/Trascrittore-portable-macos.zip` con `Trascrittore.app`, `trascrittore-cli`, `LEGGIMI.txt`
+(sorgente in `portable/LEGGIMI-macOS.txt`), `portable.txt` e la cartella vuota `dati/modelli`.
+Il pacchetto `.app` ha `Info.plist` da `portable/Info-macOS.plist` e un'icona disegnata durante la build
+da `scripts/crea-icona-macos.swift`. Accetta gli stessi
 comandi di cargo, ad esempio `bash scripts/build-macos.sh test --workspace`.
 
 - **Nessuna dipendenza esterna**: Metal, Accelerate e la libreria C++ fanno parte di macOS; la libreria
   Metal di ggml è incorporata nell'eseguibile. Versione minima: macOS 13 (modificabile con
   `MACOSX_DEPLOYMENT_TARGET`).
-- **Firma**: l'eseguibile riceve una firma «ad hoc» (`codesign --sign -`), obbligatoria su Apple
-  Silicon. Non è autenticato da Apple (serve un account sviluppatore), quindi chi scarica lo zip deve
+- **Firma**: `trascrittore-cli` e `Trascrittore.app` ricevono una firma «ad hoc» (`codesign --sign -`),
+  obbligatoria su Apple Silicon. Non è autenticato da Apple (serve un account sviluppatore), quindi chi scarica lo zip deve
   togliere la quarantena con `xattr -dr com.apple.quarantine .`, come spiegato nel LEGGIMI.
 - **Modalità portable**: identica a Windows (`dati/impostazioni.json`, `dati/modelli`), al posto di
-  `~/Library/Application Support/Trascrittore`.
+  `~/Library/Application Support/Trascrittore`. Per `Trascrittore.app` la cartella del programma è
+  quella che contiene il pacchetto (`crates/core/src/paths.rs`), così GUI e CLI condividono la stessa
+  cartella `dati` e il pacchetto firmato non viene modificato.
+- **Runtime di clang**: il codice Objective-C del backend Metal usa `@available`, cioè la funzione
+  `__isPlatformVersionAtLeast` di `libclang_rt.osx.a`, che Rust non collega da solo:
+  `crates/core/build.rs` la aggiunge (senza, il collegamento fallisce con «Undefined symbols»).
 - **Flag di compilazione**: `.cargo/config.toml` imposta `CMAKE_C_FLAGS_RELEASE` e
   `CMAKE_CXX_FLAGS_RELEASE` con i flag di Visual Studio; lo script li sostituisce con quelli di clang
   (le variabili d'ambiente hanno la precedenza su `[env]`). Un `cargo build` diretto su macOS fallirebbe.
 
-`bash scripts/verifica-macos.sh` controlla la versione portable su un Mac: eseguibile arm64 firmato e
-collegato solo a librerie di sistema, trascrizione da una copia temporanea con la GPU e con il
-processore (scarica il modello tiny-q5_1, 32 MB), dati nella cartella `dati` e nessun file nella
-Libreria dell'utente. Lo stesso controllo è in `.github/workflows/macos.yml` per GitHub Actions
+`bash scripts/verifica-macos.sh` controlla la versione portable su un Mac: eseguibili arm64 firmati e
+collegati solo a librerie di sistema, trascrizione da una copia temporanea con la GPU e con il
+processore (scarica il modello tiny-q5_1, 32 MB), verifica di accessibilità di `Trascrittore.app` con
+una trascrizione dalla finestra, dati nella cartella `dati` e nessun file nella Libreria dell'utente. Lo stesso controllo è in `.github/workflows/macos.yml` per GitHub Actions
 (runner `macos-14`, Apple Silicon).
+
+### Interfaccia grafica per Mac
+
+`Trascrittore.app` usa i controlli nativi di AppKit (crate `objc2`, codice in `crates/gui/src/mac`):
+VoiceOver legge nome, tipo, stato e valore di ogni controllo senza adattamenti. Ha la stessa
+disposizione e le stesse regole della versione per Windows, con i tasti rapidi del Mac:
+
+| Tasto | Azione |
+|---|---|
+| Comando+O | Apri file audio (anche trascinamento sull'icona o «Apri con» nel Finder) |
+| Comando+R (o F5) | Avvia la trascrizione |
+| Esc o Comando+punto | Interrompi l'operazione in corso |
+| Comando+S | Esporta (il formato si può cambiare anche nella finestra Esporta) |
+| Comando+Maiuscole+C | Copia tutto il testo trascritto |
+| Comando+L (o F2) | Leggi lo stato corrente |
+| Comando+più / Comando+meno / Comando+0 | Dimensione del testo trascritto |
+| Comando+1 … Comando+5 | Vai a file audio, modello, lingua, testo trascritto, formato |
+| Comando+? (o F1) | Guida rapida |
+
+- **Nomi accessibili**: ogni campo ha come nome la propria etichetta, impostata sulla vista e sulla
+  sua *cella* (per campi di testo e menu a comparsa VoiceOver legge la cella); le etichette visibili
+  non vengono lette una seconda volta. Il percorso del file è esposto come campo di testo, così
+  VoiceOver legge sia «File audio» sia il percorso.
+- **Annunci**: fasi, avanzamento (ogni 25%) ed esito vengono annunciati con
+  `NSAccessibilityAnnouncementRequestedNotification`, senza spostare il focus; al termine il focus passa
+  al testo trascritto.
+- **Tastiera**: l'ordine di tabulazione segue quello di lettura; nel testo trascritto Tab passa al
+  controllo successivo; Esc attiva «Interrompi» ovunque nella finestra. Senza VoiceOver, Tab raggiunge
+  pulsanti e menu a comparsa solo con «Navigazione da tastiera» attiva in Impostazioni di Sistema; i
+  comandi del menu *Vai* raggiungono comunque i campi principali.
+- **Modifiche non esportate**: indicate dal pallino nel pulsante di chiusura; uscita, nuova
+  trascrizione e cambio dei timestamp chiedono conferma.
+- OpenVINO non è disponibile su Mac (serve solo per gli acceleratori Intel); al suo posto c'è Metal.
+
+Verifica automatica, come `verifica-accessibilita.ps1` su Windows: il programma legge il proprio albero
+di accessibilità (gli stessi dati che riceve VoiceOver), controlla nomi, ruoli, etichette e ordine di
+tabulazione e, con un file audio, trascrive dalla finestra e controlla che il focus passi al testo.
+Esce con codice 0 se non ci sono problemi; `--istantanea file.png` salva anche l'aspetto della finestra.
+
+```bash
+dist/Trascrittore-portable-macos/Trascrittore.app/Contents/MacOS/trascrittore --verifica-accessibilita --modello tiny-q5_1 prova.wav
+```
 
 ## Compilazione
 
@@ -329,7 +380,10 @@ powershell -ExecutionPolicy Bypass -File scripts\verifica-accessibilita.ps1 -Aud
   esplicitamente `CMAKE_C_FLAGS_RELEASE` e `CMAKE_CXX_FLAGS_RELEASE`, con `/MT` (runtime statico) in
   accordo con `+crt-static` di Rust. Non rimuoverlo. Dopo una modifica di questi flag serve
   `cargo clean --release -p whisper-rs-sys` (con `CARGO_TARGET_DIR=C:\tr-build` per la build con GPU).
-- La GUI è solo per Windows; nucleo e CLI funzionano anche su Linux e macOS. Su macOS si compila con
+- Con Metal i distruttori globali di ggml si interrompono (`GGML_ASSERT` in `ggml-metal-device.m`) se
+  all'uscita il modello è ancora caricato sulla scheda video: la GUI per Mac lo libera prima di uscire
+  e, se una trascrizione sta ancora finendo il blocco in corso, esce senza eseguirli.
+- La GUI è per Windows e macOS; nucleo e CLI funzionano anche su Linux. Su macOS si compila con
   `scripts/build-macos.sh`; su Linux bisogna impostare `CMAKE_C_FLAGS_RELEASE` e
   `CMAKE_CXX_FLAGS_RELEASE` (ad esempio `-O3 -DNDEBUG`), perché quelli di `.cargo/config.toml` sono per
   Visual Studio.
@@ -339,8 +393,8 @@ powershell -ExecutionPolicy Bypass -File scripts\verifica-accessibilita.ps1 -Aud
 ```
 crates/core   libreria: audio, modelli, dispositivi, trascrizione, documento, esportatori
 crates/cli    trascrittore-cli
-crates/gui    trascrittore (Win32 nativo, accessibile)
-portable/     LEGGIMI.txt, LEGGIMI-macOS.txt e portable.txt delle versioni portable
+crates/gui    trascrittore (Win32 nativo su Windows, AppKit nativo su macOS, accessibile)
+portable/     LEGGIMI.txt, LEGGIMI-macOS.txt, Info-macOS.plist e portable.txt delle versioni portable
 scripts/      compilazione (Windows e macOS), verifiche e audio di prova
 ```
 

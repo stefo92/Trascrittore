@@ -1,7 +1,8 @@
-//! Trascrittore: interfaccia grafica accessibile (Win32 nativo).
+//! Trascrittore: interfaccia grafica accessibile.
 //!
-//! Tutti gli elementi sono controlli standard di Windows, quindi NVDA, JAWS e Assistente
-//! vocale li riconoscono senza adattamenti.
+//! Su Windows tutti gli elementi sono controlli Win32 standard, quindi NVDA, JAWS e Assistente
+//! vocale li riconoscono senza adattamenti; su macOS sono controlli AppKit nativi, letti da
+//! VoiceOver allo stesso modo.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -11,6 +12,8 @@ mod a11y;
 mod app;
 #[cfg(windows)]
 mod dialogs;
+#[cfg(target_os = "macos")]
+mod mac;
 #[cfg(windows)]
 mod win;
 
@@ -28,8 +31,22 @@ fn main() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn main() {
-    eprintln!("L'interfaccia grafica è disponibile solo su Windows. Usa «trascrittore-cli».");
+    let options = match mac::Options::from_args(std::env::args_os().skip(1)) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
+    mac::run(options);
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn main() {
+    eprintln!(
+        "L'interfaccia grafica è disponibile solo su Windows e macOS. Usa «trascrittore-cli»."
+    );
     std::process::exit(1);
 }

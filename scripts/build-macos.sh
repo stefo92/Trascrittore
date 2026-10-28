@@ -3,7 +3,8 @@
 #
 # La GPU del Mac (Metal) viene inclusa automaticamente; con --solo-cpu si compila la versione che
 # usa solo il processore. Dopo una build release viene preparata la versione portable in
-# dist/Trascrittore-portable-macos, insieme al suo zip.
+# dist/Trascrittore-portable-macos (interfaccia grafica Trascrittore.app e trascrittore-cli),
+# insieme al suo zip.
 #
 # Requisiti: Xcode Command Line Tools (xcode-select --install), CMake (brew install cmake) e Rust
 # con il target aarch64-apple-darwin (rustup target add aarch64-apple-darwin).
@@ -95,13 +96,43 @@ cp "$root/portable/portable.txt" "$portable/portable.txt"
 # La GPL chiede di accompagnare l'eseguibile con il testo della licenza.
 cp "$root/LICENSE" "$portable/LICENZA.txt"
 
+# Interfaccia grafica: pacchetto Trascrittore.app accanto a trascrittore-cli. Il programma
+# riconosce il pacchetto e usa la cartella «dati» che lo contiene (vedi crates/core/src/paths.rs).
+app="$portable/Trascrittore.app"
+if [ -f "$out/trascrittore" ]; then
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp "$out/trascrittore" "$app/Contents/MacOS/trascrittore"
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)"
+    sed -e "s/@VERSIONE@/$version/g" -e "s/@MACOS_MINIMO@/$MACOSX_DEPLOYMENT_TARGET/g" \
+        "$root/portable/Info-macOS.plist" > "$app/Contents/Info.plist"
+    plutil -lint -s "$app/Contents/Info.plist"
+    printf 'APPL????' > "$app/Contents/PkgInfo"
+    # L'icona viene disegnata una sola volta e conservata nella cartella di build.
+    icon="$out/Trascrittore.icns"
+    if [ ! -f "$icon" ] || [ "$root/scripts/crea-icona-macos.swift" -nt "$icon" ]; then
+        swift "$root/scripts/crea-icona-macos.swift" "$icon" || rm -f "$icon"
+    fi
+    if [ -f "$icon" ]; then
+        cp "$icon" "$app/Contents/Resources/Trascrittore.icns"
+    fi
+    codesign --force --sign - "$app"
+else
+    rm -rf "$app"
+fi
+
 staging="$(mktemp -d)"
 mkdir -p "$staging/$name/dati/modelli"
 cp "$portable/trascrittore-cli" "$portable/LEGGIMI.txt" "$portable/portable.txt" \
     "$portable/LICENZA.txt" "$staging/$name/"
+if [ -d "$app" ]; then
+    ditto "$app" "$staging/$name/Trascrittore.app"
+fi
 rm -f "$dist/$name.zip"
-# ditto conserva permessi di esecuzione e firma, come l'Utility Archivio di macOS.
-ditto -c -k --keepParent "$staging/$name" "$dist/$name.zip"
+# ditto conserva permessi di esecuzione e firma, come l'Utility Archivio di macOS; --norsrc
+# esclude gli attributi estesi, che altri programmi estrarrebbero come file «._…» dentro il
+# pacchetto .app, invalidandone la firma.
+ditto -c -k --norsrc --keepParent "$staging/$name" "$dist/$name.zip"
 rm -rf "$staging"
 
 kind="con supporto per la scheda video Metal"
