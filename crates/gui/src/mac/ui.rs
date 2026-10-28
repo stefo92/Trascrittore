@@ -321,6 +321,23 @@ pub fn confirm(
     }
 }
 
+/// Domanda con più risposte: il primo pulsante è quello predefinito (Invio), l'ultimo si
+/// attiva anche con Esc. Restituisce l'indice del pulsante scelto.
+pub fn choose(title: &str, text: &str, buttons: &[&str], mtm: MainThreadMarker) -> usize {
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Informational);
+    alert.setMessageText(&ns(title));
+    alert.setInformativeText(&ns(text));
+    for (index, title) in buttons.iter().enumerate() {
+        let button = alert.addButtonWithTitle(&ns(title));
+        if index > 0 && index + 1 == buttons.len() {
+            button.setKeyEquivalent(&ns("\u{1b}"));
+        }
+    }
+    let response = alert.runModal() - NSAlertFirstButtonReturn;
+    usize::try_from(response).unwrap_or(buttons.len() - 1).min(buttons.len() - 1)
+}
+
 pub fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&ns(&path.to_string_lossy()))
 }

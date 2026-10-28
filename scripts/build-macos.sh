@@ -1,8 +1,8 @@
 #!/bin/bash
 # Compila Trascrittore per macOS su Apple Silicon ed esegue cargo con gli argomenti indicati.
 #
-# La GPU del Mac (Metal) viene inclusa automaticamente; con --solo-cpu si compila la versione che
-# usa solo il processore. Dopo una build release viene preparata la versione portable in
+# La GPU del Mac (Metal) e il Neural Engine (Core ML) vengono inclusi automaticamente; con
+# --solo-cpu si compila la versione che usa solo il processore. Dopo una build release viene preparata la versione portable in
 # dist/Trascrittore-portable-macos (interfaccia grafica Trascrittore.app e trascrittore-cli),
 # insieme al suo zip.
 #
@@ -62,8 +62,8 @@ case "$cmd" in
         fi
         extra+=(--target "$target")
         if [ "$cpu_only" -eq 0 ]; then
-            extra+=(--features trascrittore-core/metal)
-            echo "Supporto per la scheda video (Metal) incluso. Usa --solo-cpu per escluderlo."
+            extra+=(--features trascrittore-core/metal,trascrittore-core/coreml)
+            echo "Supporto per la scheda video (Metal) e il Neural Engine (Core ML) incluso. Usa --solo-cpu per escluderlo."
         fi
         ;;
 esac
@@ -135,7 +135,7 @@ rm -f "$dist/$name.zip"
 ditto -c -k --norsrc --keepParent "$staging/$name" "$dist/$name.zip"
 rm -rf "$staging"
 
-kind="con supporto per la scheda video Metal"
+kind="con supporto per la scheda video Metal e il Neural Engine"
 if [ "$cpu_only" -eq 1 ]; then kind="solo processore"; fi
 echo "Versione portable per macOS ($kind) pronta in: $portable"
 echo "Archivio della versione portable: $dist/$name.zip"

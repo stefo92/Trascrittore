@@ -17,6 +17,8 @@ L'analisi completa del progetto è in [ANALISI.md](ANALISI.md).
   NVIDIA anche tramite CUDA; Mac Apple Silicon tramite Metal), con scelta automatica.
 - Encoder su **OpenVINO** (Intel): acceleratori neurali (NPU), schede video Intel o processore;
   runtime scaricabile dal programma, nessuna dipendenza per compilare.
+- Encoder sul **Neural Engine** dei Mac Apple Silicon tramite **Core ML** (vedi
+  [Neural Engine](#neural-engine-core-ml)), con l'encoder del modello scaricabile dal programma.
 - Testo modificabile prima dell'esportazione, con o senza marcature temporali.
 - Documenti esportati accessibili:
   - **PDF taggato conforme a PDF/UA-1** (struttura, lingua, titolo, segnalibri);
@@ -92,7 +94,9 @@ trascrittore-cli trascrivi lezione.mp3 -m small-q5_1 --openvino npu --scarica-mo
 `--dispositivo` accetta `auto` (predefinito), `cpu`, `gpu` (prima scheda video) o `gpu:N`;
 `--rapida` attiva la modalità rapida; `--flash-attention` attiva Flash Attention;
 `--openvino npu|gpu|gpu.1|cpu` esegue l'encoder con OpenVINO (con `--scarica-modello` scarica anche
-l'encoder se manca). Altri comandi: `trascrittore-cli openvino` (stato e dispositivi OpenVINO),
+l'encoder se manca). Sui Mac l'encoder Core ML (Neural Engine) si usa quando è presente accanto al
+modello, `--scarica-modello` lo scarica se manca e `--senza-neural-engine` lo esclude;
+`trascrittore-cli scarica <modello>` scarica anche l'encoder. Altri comandi: `trascrittore-cli openvino` (stato e dispositivi OpenVINO),
 `trascrittore-cli installa-openvino`, `trascrittore-cli dispositivi` (processore e schede video utilizzabili),
 `trascrittore-cli modelli` (elenco e stato dei modelli), `trascrittore-cli scarica <modello>`,
 `trascrittore-cli lingue`, `trascrittore-cli --help`. L'avanzamento è stampato su righe separate,
@@ -209,15 +213,16 @@ bash scripts/build-macos.sh build --release
 ```
 
 Lo script compila per `aarch64-apple-darwin` con la GPU del Mac (**Metal**, feature
-`trascrittore-core/metal`; `--solo-cpu` per escluderla) e crea **`dist/Trascrittore-portable-macos`**
+`trascrittore-core/metal`) e il Neural Engine (**Core ML**, feature `trascrittore-core/coreml`;
+`--solo-cpu` esclude entrambi) e crea **`dist/Trascrittore-portable-macos`**
 e `dist/Trascrittore-portable-macos.zip` con `Trascrittore.app`, `trascrittore-cli`, `LEGGIMI.txt`
 (sorgente in `portable/LEGGIMI-macOS.txt`), `portable.txt` e la cartella vuota `dati/modelli`.
 Il pacchetto `.app` ha `Info.plist` da `portable/Info-macOS.plist` e un'icona disegnata durante la build
 da `scripts/crea-icona-macos.swift`. Accetta gli stessi
 comandi di cargo, ad esempio `bash scripts/build-macos.sh test --workspace`.
 
-- **Nessuna dipendenza esterna**: Metal, Accelerate e la libreria C++ fanno parte di macOS; la libreria
-  Metal di ggml è incorporata nell'eseguibile. Versione minima: macOS 13 (modificabile con
+- **Nessuna dipendenza esterna**: Metal, Core ML, Accelerate e la libreria C++ fanno parte di macOS; la
+  libreria Metal di ggml è incorporata nell'eseguibile. Versione minima: macOS 13 (modificabile con
   `MACOSX_DEPLOYMENT_TARGET`).
 - **Firma**: `trascrittore-cli` e `Trascrittore.app` ricevono una firma «ad hoc» (`codesign --sign -`),
   obbligatoria su Apple Silicon. Non è autenticato da Apple (serve un account sviluppatore), quindi chi scarica lo zip deve
@@ -239,6 +244,44 @@ processore (scarica il modello tiny-q5_1, 32 MB), verifica di accessibilità di 
 una trascrizione dalla finestra, dati nella cartella `dati` e nessun file nella Libreria dell'utente. Lo stesso controllo è in `.github/workflows/macos.yml` per GitHub Actions
 (runner `macos-14`, Apple Silicon).
 
+### Neural Engine (Core ML)
+
+Sui Mac Apple Silicon l'**encoder** di Whisper, la parte più pesante del calcolo, può girare con Core ML
+sul Neural Engine; il decoder resta su Metal o sul processore. whisper.cpp è compilato con
+`WHISPER_COREML` (feature `coreml` di whisper-rs, con ripiego sull'encoder normale) e usa la cartella
+`ggml-<famiglia>-encoder.mlmodelc` che trova accanto al modello (`crates/core/src/coreml.rs`). Gli
+encoder già convertiti sono pubblicati nel repository ufficiale di whisper.cpp, uno per famiglia e validi
+anche per le varianti compresse: tiny 15 MB, base 38 MB, small 163 MB, medium 568 MB, large-v3 e
+large-v3-turbo circa 1,2 GB. Il programma li scarica su richiesta, ne verifica l'impronta SHA-256 e li
+estrae in `dati/modelli` (o nella cartella dei modelli).
+
+- **GUI**: casella *Usa il Neural Engine (Core ML)*, attiva per impostazione predefinita. Se l'encoder del
+  modello manca, alla trascrizione Trascrittore chiede se scaricarlo (*Scarica*, *Trascrivi senza*,
+  *Annulla*); *Trascrizione > Scarica il modello selezionato* scarica anche l'encoder. Lo stato dice se
+  l'encoder è stato eseguito sul Neural Engine; se Core ML non si attiva viene usato l'encoder normale,
+  con un avviso.
+- **Disattivazione**: whisper.cpp userebbe l'encoder Core ML ogni volta che lo trova; quando è disattivato
+  il modello viene caricato dalla memoria, così whisper.cpp non conosce il percorso e usa l'encoder
+  normale.
+- **Prima esecuzione**: macOS compila il modello per il Neural Engine (con large-v3-turbo circa 15 secondi
+  su Apple M5) e lo tiene in cache; succede di nuovo dopo un aggiornamento del programma. Trascrittore lo
+  fa durante il caricamento del modello e lo annuncia. L'indice della cache (pochi kB) sta in
+  `~/Library/Caches/<programma>`: lo crea macOS, anche nella versione portable.
+
+Misure su Apple M5 (macOS 27), 3 minuti di audio in italiano, tempo totale del programma:
+
+| Modello | Configurazione | Encoder normale | Encoder Core ML |
+|---|---|---|---|
+| large-v3-turbo-q5_0 | Scheda video | 14,3 s | 10,3 s |
+| large-v3-turbo-q5_0 | Scheda video, modalità rapida | 11,3 s | 6,8 s |
+| large-v3-turbo-q5_0 | Solo processore | 30,4 s | 12,3 s |
+| base-q5_1 | Scheda video | 4,2 s | 4,7 s |
+| base-q5_1 | Solo processore | 6,2 s | 5,2 s |
+
+Con i modelli piccoli la scheda video dell'M5 è veloce quanto il Neural Engine; con quelli grandi Core ML
+è circa un terzo più rapido sulla scheda video e due volte e mezza col solo processore. Il testo è
+equivalente (l'encoder Core ML non è compresso, quindi le parole possono differire leggermente).
+
 ### Interfaccia grafica per Mac
 
 `Trascrittore.app` usa i controlli nativi di AppKit (crate `objc2`, codice in `crates/gui/src/mac`):
@@ -257,6 +300,9 @@ disposizione e le stesse regole della versione per Windows, con i tasti rapidi d
 | Comando+1 … Comando+5 | Vai a file audio, modello, lingua, testo trascritto, formato |
 | Comando+? (o F1) | Guida rapida |
 
+La casella *Usa il Neural Engine (Core ML)* esegue l'encoder sul Neural Engine (vedi
+[Neural Engine](#neural-engine-core-ml)).
+
 - **Nomi accessibili**: ogni campo ha come nome la propria etichetta, impostata sulla vista e sulla
   sua *cella* (per campi di testo e menu a comparsa VoiceOver legge la cella); le etichette visibili
   non vengono lette una seconda volta. Il percorso del file è esposto come campo di testo, così
@@ -270,7 +316,8 @@ disposizione e le stesse regole della versione per Windows, con i tasti rapidi d
   comandi del menu *Vai* raggiungono comunque i campi principali.
 - **Modifiche non esportate**: indicate dal pallino nel pulsante di chiusura; uscita, nuova
   trascrizione e cambio dei timestamp chiedono conferma.
-- OpenVINO non è disponibile su Mac (serve solo per gli acceleratori Intel); al suo posto c'è Metal.
+- OpenVINO non è disponibile su Mac (serve solo per gli acceleratori Intel); al suo posto ci sono Metal
+  e il Neural Engine (casella *Usa il Neural Engine (Core ML)*, dopo *Scheda video*).
 
 Verifica automatica, come `verifica-accessibilita.ps1` su Windows: il programma legge il proprio albero
 di accessibilità (gli stessi dati che riceve VoiceOver), controlla nomi, ruoli, etichette e ordine di

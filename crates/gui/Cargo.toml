@@ -16,6 +16,7 @@ path = "src/main.rs"
 vulkan = ["trascrittore-core/vulkan"]
 cuda = ["trascrittore-core/cuda"]
 metal = ["trascrittore-core/metal"]
+coreml = ["trascrittore-core/coreml"]
 
 [dependencies]
 trascrittore-core.workspace = true

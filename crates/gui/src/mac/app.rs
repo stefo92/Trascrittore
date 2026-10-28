@@ -32,9 +32,11 @@ use trascrittore_core::export::{self, ExportFormat};
 use trascrittore_core::models::{self, ModelInfo};
 use trascrittore_core::pipeline::{self, Job, Outcome, Progress, ProgressFn};
 use trascrittore_core::settings::Settings;
-use trascrittore_core::transcriber::{self, EngineOptions, TranscribeOptions, Transcriber};
+use trascrittore_core::transcriber::{
+    self, CoreMlUse, EngineOptions, TranscribeOptions, Transcriber,
+};
 use trascrittore_core::transcript::{format_duration_words, Transcript};
-use trascrittore_core::{audio, is_cancelled, languages, paths};
+use trascrittore_core::{audio, coreml, is_cancelled, languages, paths};
 
 use super::check::{self, CheckOptions};
 use super::ui::{self, ns, rect, FlippedView, Level};
@@ -48,7 +50,7 @@ const HELP_TEXT: &str = "Uso di Trascrittore
 
 1. Premi Comando+O (oppure il pulsante Scegli) e scegli un file audio. Puoi anche trascinare il file sull'icona di Trascrittore nel Dock o usare «Apri con» nel Finder.
 2. Scegli modello e lingua. Il modello consigliato è «Large v3 Turbo compresso»; i modelli «compressi» più piccoli sono più veloci ma meno precisi.
-   «Usa la scheda video (GPU)» usa la scheda video del Mac tramite Metal: è molto più veloce del processore. «Modalità rapida» accelera ancora, con qualche errore in più. Flash Attention (menu Trascrizione) è disattivata: su alcune schede video accelera, su altre rallenta.
+   «Usa la scheda video (GPU)» usa la scheda video del Mac tramite Metal: è molto più veloce del processore. «Usa il Neural Engine (Core ML)» esegue la parte più pesante del calcolo sul Neural Engine del Mac: con il modello consigliato la trascrizione è circa un terzo più veloce, e con il solo processore più del doppio. Serve un file aggiuntivo per ogni modello, che Trascrittore propone di scaricare alla prima trascrizione; la prima volta macOS prepara il modello e serve qualche secondo in più. «Modalità rapida» accelera ancora, con qualche errore in più. Flash Attention (menu Trascrizione) è disattivata: su alcune schede video accelera, su altre rallenta.
 3. Premi Comando+R per avviare la trascrizione. Esc o Comando+punto la interrompono.
 4. Al termine il cursore si sposta sul testo trascritto: puoi leggerlo e correggerlo.
 5. Scegli il formato e premi Comando+S per esportare.
@@ -77,6 +79,8 @@ Nel testo trascritto Tab passa al controllo successivo e Maiuscole+Tab a quello 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Downloading,
+    DownloadingEncoder,
+    Extracting,
     Decoding,
     LoadingModel,
     Transcribing,
@@ -86,6 +90,8 @@ impl Phase {
     fn description(self) -> &'static str {
         match self {
             Phase::Downloading => "Download del modello in corso",
+            Phase::DownloadingEncoder => "Download dell'encoder per il Neural Engine in corso",
+            Phase::Extracting => "Estrazione dei file in corso",
             Phase::Decoding => "Decodifica dell'audio in corso",
             Phase::LoadingModel => "Caricamento del modello in memoria",
             Phase::Transcribing => "Trascrizione in corso",
@@ -95,7 +101,10 @@ impl Phase {
 
 /// Eventi dal thread di lavoro all'interfaccia.
 enum WorkerEvent {
-    Downloading(u32),
+    /// Avanzamento di un download (modello o encoder Core ML).
+    Downloading(Phase, u32),
+    /// Download finito, estrazione dei file in corso.
+    Extracting,
     Pipeline(Progress),
     Transcribed(Outcome),
     DownloadFinished,
@@ -165,6 +174,7 @@ pub(super) struct Ui {
     use_gpu: Retained<NSButton>,
     device_label: Retained<NSTextField>,
     device: Retained<NSPopUpButton>,
+    neural_engine: Retained<NSButton>,
     translate: Retained<NSButton>,
     timestamps: Retained<NSButton>,
     fast: Retained<NSButton>,
@@ -201,6 +211,9 @@ pub struct State {
     last_milestone: Cell<u32>,
     started: Cell<Option<Instant>>,
     gpu_warning_shown: Cell<bool>,
+    coreml_warning_shown: Cell<bool>,
+    /// La trascrizione in corso usa l'encoder Core ML.
+    pending_coreml: Cell<bool>,
     status: RefCell<String>,
     cancel_flag: RefCell<Arc<AtomicBool>>,
     events_tx: Sender<WorkerEvent>,
@@ -461,6 +474,11 @@ define_class!(
             self.ivars().settings.borrow_mut().device = self.selected_device();
         }
 
+        #[unsafe(method(neuralEngineToggled:))]
+        fn neural_engine_toggled(&self, _sender: Option<&AnyObject>) {
+            self.on_neural_engine_toggled();
+        }
+
         #[unsafe(method(translateToggled:))]
         fn translate_toggled(&self, _sender: Option<&AnyObject>) {
             self.ivars().settings.borrow_mut().translate = ui::is_checked(&self.ui().translate);
@@ -535,6 +553,8 @@ impl Controller {
             last_milestone: Cell::new(0),
             started: Cell::new(None),
             gpu_warning_shown: Cell::new(false),
+            coreml_warning_shown: Cell::new(false),
+            pending_coreml: Cell::new(false),
             status: RefCell::new("Pronto.".to_string()),
             cancel_flag: RefCell::new(Arc::new(AtomicBool::new(false))),
             events_tx,
@@ -583,6 +603,12 @@ impl Controller {
         ui::set_help(&use_gpu, &gpu_availability_text());
         let device_label = ui::label("Scheda video:", mtm);
         let device = ui::popup("Scheda video", target, sel!(deviceChanged:), mtm);
+        let neural_engine =
+            ui::checkbox("Usa il Neural Engine (Core ML)", target, sel!(neuralEngineToggled:), mtm);
+        ui::set_help(
+            &neural_engine,
+            "Esegue la parte più pesante del calcolo con Core ML sul Neural Engine del Mac: con i modelli grandi la trascrizione è molto più veloce. Serve un file aggiuntivo per ogni modello, scaricato alla prima trascrizione.",
+        );
         let translate = ui::checkbox("Traduci in inglese", target, sel!(translateToggled:), mtm);
         let timestamps = ui::checkbox("Includi timestamp", target, sel!(timestampsToggled:), mtm);
         ui::set_help(
@@ -615,7 +641,7 @@ impl Controller {
         ui::set_help(&export, "Comando+S");
 
         let content = FlippedView::new(mtm);
-        let views: [&NSView; 24] = [
+        let views: [&NSView; 25] = [
             &audio_label,
             &audio_path,
             &browse,
@@ -626,6 +652,7 @@ impl Controller {
             &use_gpu,
             &device_label,
             &device,
+            &neural_engine,
             &translate,
             &timestamps,
             &fast,
@@ -680,6 +707,7 @@ impl Controller {
             use_gpu,
             device_label,
             device,
+            neural_engine,
             translate,
             timestamps,
             fast,
@@ -734,10 +762,17 @@ impl Controller {
         ui::set_checked(&ui.translate, settings.translate);
         ui::set_checked(&ui.timestamps, settings.timestamps);
         ui::set_checked(&ui.fast, settings.fast_mode);
+        ui::set_checked(&ui.neural_engine, settings.neural_engine);
+        // Senza Core ML (versione «solo processore») la casella non compare.
+        ui.neural_engine.setHidden(!coreml::compiled());
         self.update_text_font();
 
         // Stato iniziale: dice subito se si userà la scheda video (leggibile con Comando+L).
-        self.set_status(&format!("Pronto. {}", self.device_summary()), false);
+        let mut status = format!("Pronto. {}", self.device_summary());
+        if self.neural_engine_selected() {
+            status.push_str(" L'encoder userà il Neural Engine.");
+        }
+        self.set_status(&status, false);
         ui.cancel.setEnabled(false);
         self.layout();
     }
@@ -901,6 +936,22 @@ impl Controller {
         self.ivars().settings.borrow_mut().device = self.selected_device();
         self.update_device_enabled();
         self.set_status(&self.device_summary(), true);
+    }
+
+    /// `true` se l'encoder deve usare Core ML (casella attiva in una versione che lo include).
+    fn neural_engine_selected(&self) -> bool {
+        coreml::compiled() && ui::is_checked(&self.ui().neural_engine)
+    }
+
+    fn on_neural_engine_toggled(&self) {
+        let enabled = ui::is_checked(&self.ui().neural_engine);
+        self.ivars().settings.borrow_mut().neural_engine = enabled;
+        let message = if enabled {
+            "L'encoder userà il Neural Engine (Core ML): con i modelli grandi la trascrizione è molto più veloce."
+        } else {
+            "Neural Engine disattivato: l'encoder userà la scheda video o il processore."
+        };
+        self.set_status(message, true);
     }
 
     fn toggle_flash_attention(&self) {
@@ -1092,6 +1143,31 @@ impl Controller {
             ModelChoice::Custom(path) => (path.clone(), None),
         };
 
+        // Encoder Core ML: già presente, da scaricare (su conferma) o non usato.
+        let mut use_coreml = self.neural_engine_selected();
+        let mut encoder_download = None;
+        if use_coreml && coreml::find_encoder(&model_path).is_none() {
+            match coreml::package_for_model(&model_path) {
+                Some(package) => match self.choose(
+                    "Scaricare l'encoder per il Neural Engine?",
+                    &format!(
+                        "Con il Neural Engine del Mac la trascrizione è più veloce. Serve l'encoder Core ML del modello, circa {}; il download avviene una sola volta. La prima trascrizione richiede qualche secondo in più, perché macOS prepara il modello.",
+                        models::format_size(package.size_bytes)
+                    ),
+                    &["Scarica", "Trascrivi senza", "Annulla"],
+                ) {
+                    0 => {
+                        let dir = model_path.parent().map(Path::to_path_buf).unwrap_or_default();
+                        encoder_download = Some((*package, dir));
+                    }
+                    1 => use_coreml = false,
+                    _ => return,
+                },
+                // Modello personalizzato senza encoder pubblicato: si usa quello normale.
+                None => use_coreml = false,
+            }
+        }
+
         let ui = self.ui();
         let translated = ui::is_checked(&ui.translate);
         let options = TranscribeOptions {
@@ -1108,6 +1184,7 @@ impl Controller {
             device: self.selected_device(),
             engine: EngineOptions {
                 flash_attention: self.ivars().settings.borrow().flash_attention,
+                coreml: use_coreml,
             },
             options,
         };
@@ -1116,10 +1193,16 @@ impl Controller {
         let notifier = self.notifier();
         let cache = Arc::clone(&self.ivars().cache);
         *self.ivars().pending.borrow_mut() = Some((model.display_name(), translated));
+        self.ivars().pending_coreml.set(use_coreml);
 
         std::thread::spawn(move || {
             if let Some(info) = download {
                 if !download_with_progress(info, &notifier, &cancel) {
+                    return;
+                }
+            }
+            if let Some((package, dir)) = encoder_download {
+                if !download_encoder_with_progress(&package, &dir, &notifier, &cancel) {
                     return;
                 }
             }
@@ -1144,24 +1227,58 @@ impl Controller {
             );
             return;
         };
-        if info.is_downloaded() {
-            self.set_status(&format!("Il modello «{}» è già scaricato.", info.description), true);
+        let Ok(model_path) = info.path() else {
+            return;
+        };
+        // Con il Neural Engine attivo si scarica anche l'encoder Core ML del modello.
+        let encoder = coreml::package_for_model(&model_path)
+            .filter(|_| self.neural_engine_selected())
+            .filter(|_| coreml::find_encoder(&model_path).is_none());
+        let download_model = !info.is_downloaded();
+        let (title, text) = match (download_model, encoder) {
+            (false, None) => {
+                self.set_status(&format!("Il modello «{}» è già scaricato.", info.description), true);
+                return;
+            }
+            (true, None) => (
+                format!("Scaricare il modello «{}»?", info.description),
+                format!("Dimensione: circa {}.", models::format_size(info.size_bytes)),
+            ),
+            (true, Some(package)) => (
+                format!("Scaricare il modello «{}»?", info.description),
+                format!(
+                    "Dimensione: circa {}, più circa {} per l'encoder del Neural Engine.",
+                    models::format_size(info.size_bytes),
+                    models::format_size(package.size_bytes)
+                ),
+            ),
+            (false, Some(package)) => (
+                "Scaricare l'encoder per il Neural Engine?".to_string(),
+                format!(
+                    "Il modello «{}» è già scaricato; manca il suo encoder per il Neural Engine. Dimensione: circa {}.",
+                    info.description,
+                    models::format_size(package.size_bytes)
+                ),
+            ),
+        };
+        if !self.confirm(&title, &text, "Scarica", false) {
             return;
         }
-        if !self.confirm(
-            &format!("Scaricare il modello «{}»?", info.description),
-            &format!("Dimensione: circa {}.", models::format_size(info.size_bytes)),
-            "Scarica",
-            false,
-        ) {
-            return;
-        }
+        let encoder = encoder.map(|package| {
+            (*package, model_path.parent().map(Path::to_path_buf).unwrap_or_default())
+        });
         let cancel = self.begin_busy();
         let notifier = self.notifier();
         std::thread::spawn(move || {
-            if download_with_progress(info, &notifier, &cancel) {
-                notifier.send(WorkerEvent::DownloadFinished);
+            if download_model && !download_with_progress(info, &notifier, &cancel) {
+                return;
             }
+            if let Some((package, dir)) = encoder {
+                if !download_encoder_with_progress(&package, &dir, &notifier, &cancel) {
+                    return;
+                }
+            }
+            notifier.send(WorkerEvent::DownloadFinished);
         });
     }
 
@@ -1409,7 +1526,7 @@ impl Controller {
             gpus.iter().map(|g| g.label()).collect::<Vec<_>>().join("\n")
         };
         let mut text = format!(
-            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n{summary}\nFlash Attention: {flash}\n\nCartella dei modelli:\n{}",
+            "{} {}\n\nTrascrizione audio in locale con Whisper (whisper.cpp {}).\nNessun dato viene inviato in rete: solo i modelli vengono scaricati, su richiesta.\n\nSupporto schede video: {gpu_support}\nSchede video utilizzabili:\n{gpu_list}\n{summary}\nFlash Attention: {flash}\nNeural Engine (Core ML): {neural_engine}\n\nCartella dei modelli:\n{}",
             trascrittore_core::APP_NAME,
             trascrittore_core::APP_VERSION,
             transcriber::engine_version(),
@@ -1421,6 +1538,13 @@ impl Controller {
                 "attiva"
             } else {
                 "disattivata"
+            },
+            neural_engine = if !coreml::compiled() {
+                "non incluso in questa versione"
+            } else if self.neural_engine_selected() {
+                "attivo"
+            } else {
+                "disattivato"
             },
         );
         if let Some(data) = paths::portable_data_dir() {
@@ -1489,6 +1613,16 @@ impl Controller {
         ui::alert(level, title, text, self.mtm());
     }
 
+    /// Domanda con più risposte; restituisce l'indice del pulsante scelto (l'ultimo è
+    /// «Annulla»). Nella verifica automatica sceglie la prima risposta.
+    fn choose(&self, title: &str, text: &str, buttons: &[&str]) -> usize {
+        if self.checking() {
+            println!("Scelta «{}»: {title} {text}", buttons[0]);
+            return 0;
+        }
+        ui::choose(title, text, buttons, self.mtm())
+    }
+
     fn confirm(&self, title: &str, text: &str, action: &str, safe_default: bool) -> bool {
         if self.checking() {
             println!("Conferma accettata: {title} {text}");
@@ -1500,7 +1634,7 @@ impl Controller {
     // ----- Stato «occupato» -----
 
     /// Controlli disattivati durante un'operazione.
-    fn idle_controls(&self) -> [&NSControl; 11] {
+    fn idle_controls(&self) -> [&NSControl; 12] {
         let ui = self.ui();
         [
             &ui.browse,
@@ -1508,6 +1642,7 @@ impl Controller {
             &ui.lang,
             &ui.use_gpu,
             &ui.device,
+            &ui.neural_engine,
             &ui.translate,
             &ui.timestamps,
             &ui.fast,
@@ -1563,9 +1698,13 @@ impl Controller {
     fn handle_event(&self, event: WorkerEvent) {
         let ui = self.ui();
         match event {
-            WorkerEvent::Downloading(percent) => {
-                self.enter_phase(Phase::Downloading);
-                self.show_progress(Phase::Downloading, percent);
+            WorkerEvent::Downloading(phase, percent) => {
+                self.enter_phase(phase);
+                self.show_progress(phase, percent);
+            }
+            WorkerEvent::Extracting => {
+                self.enter_phase(Phase::Extracting);
+                ui.progress.setDoubleValue(100.0);
             }
             WorkerEvent::Pipeline(Progress::Decoding(fraction)) => {
                 self.enter_phase(Phase::Decoding);
@@ -1574,7 +1713,15 @@ impl Controller {
             WorkerEvent::Pipeline(Progress::LoadingModel(device)) => {
                 self.ivars().phase.set(Some(Phase::LoadingModel));
                 ui.progress.setDoubleValue(0.0);
-                self.set_status(&format!("Caricamento del modello su {}…", device.label()), true);
+                let mut message = format!("Caricamento del modello su {}", device.label());
+                if self.ivars().pending_coreml.get() {
+                    message.push_str(
+                        " e preparazione del Neural Engine… La prima volta macOS prepara il modello: può richiedere fino a qualche minuto.",
+                    );
+                } else {
+                    message.push('…');
+                }
+                self.set_status(&message, true);
             }
             WorkerEvent::Pipeline(Progress::Transcribing(percent)) => {
                 self.enter_phase(Phase::Transcribing);
@@ -1616,9 +1763,10 @@ impl Controller {
         let text = format!("{}: {percent}%", phase.description());
         // Annuncio vocale solo ai traguardi del 25%, per non disturbare la lettura.
         let milestone = percent / 25 * 25;
-        let announce = matches!(phase, Phase::Downloading | Phase::Transcribing)
-            && milestone > self.ivars().last_milestone.get()
-            && milestone < 100;
+        let announce =
+            matches!(phase, Phase::Downloading | Phase::DownloadingEncoder | Phase::Transcribing)
+                && milestone > self.ivars().last_milestone.get()
+                && milestone < 100;
         if announce {
             self.ivars().last_milestone.set(milestone);
         }
@@ -1626,7 +1774,7 @@ impl Controller {
     }
 
     fn on_transcribed(&self, outcome: Outcome) {
-        let Outcome { transcript, device, gpu_warning, openvino: _ } = outcome;
+        let Outcome { transcript, device, gpu_warning, openvino: _, coreml } = outcome;
         let ui = self.ui();
         let elapsed = self
             .ivars()
@@ -1662,12 +1810,32 @@ impl Controller {
             status.push(' ');
             status.push_str(warning);
         }
+        let coreml_warning = match coreml {
+            Some(CoreMlUse::Active) => {
+                status.push_str(" Encoder eseguito sul Neural Engine (Core ML).");
+                None
+            }
+            Some(CoreMlUse::Failed { reason }) => {
+                let warning = format!(
+                    "Il Neural Engine non si è attivato ({reason}): è stato usato l'encoder normale."
+                );
+                status.push(' ');
+                status.push_str(&warning);
+                Some(warning)
+            }
+            None => None,
+        };
         // Prima si sposta il focus sul testo, poi si annuncia l'esito.
         self.end_busy(&ui.text);
         self.set_status(&status, true);
         if let Some(warning) = gpu_warning {
             if !self.ivars().gpu_warning_shown.replace(true) {
                 self.alert(Level::Warning, "Scheda video non usata", &warning);
+            }
+        }
+        if let Some(warning) = coreml_warning {
+            if !self.ivars().coreml_warning_shown.replace(true) {
+                self.alert(Level::Warning, "Neural Engine non usato", &warning);
             }
         }
         if self.checking() {
@@ -1791,6 +1959,11 @@ impl Controller {
         place_label(&ui.device_label, y);
         place_row(&ui.device, x1, y, field_w);
         y += row_h + gap;
+
+        if !ui.neural_engine.isHidden() {
+            place_row(&ui.neural_engine, x1, y, natural(&ui.neural_engine).width);
+            y += row_h + gap;
+        }
 
         // Opzioni sulla stessa riga, che va a capo se la finestra è stretta.
         let mut x = x1;
@@ -2013,16 +2186,20 @@ fn gpu_availability_text() -> String {
     }
 }
 
-/// Inoltra l'avanzamento di un download a ogni punto percentuale.
-fn download_progress(notifier: &Notifier) -> impl FnMut(u64, Option<u64>) + '_ {
-    notifier.send(WorkerEvent::Downloading(0));
+/// Inoltra l'avanzamento di un download a ogni punto percentuale; a download completato
+/// segnala l'estrazione dei file (per gli encoder Core ML).
+fn download_progress(notifier: &Notifier, phase: Phase) -> impl FnMut(u64, Option<u64>) + '_ {
+    notifier.send(WorkerEvent::Downloading(phase, 0));
     let mut last = 0u32;
     move |done, total| {
         if let Some(total) = total.filter(|t| *t > 0) {
             let percent = (done * 100 / total) as u32;
             if percent != last {
                 last = percent;
-                notifier.send(WorkerEvent::Downloading(percent));
+                notifier.send(WorkerEvent::Downloading(phase, percent));
+                if done >= total && phase != Phase::Downloading {
+                    notifier.send(WorkerEvent::Extracting);
+                }
             }
         }
     }
@@ -2031,7 +2208,29 @@ fn download_progress(notifier: &Notifier) -> impl FnMut(u64, Option<u64>) + '_ {
 /// Scarica un modello inoltrando l'avanzamento; restituisce `false` in caso di errore o
 /// annullamento (l'evento corrispondente è già stato inviato).
 fn download_with_progress(info: &ModelInfo, notifier: &Notifier, cancel: &AtomicBool) -> bool {
-    match models::download(info, download_progress(notifier), cancel) {
+    match models::download(info, download_progress(notifier, Phase::Downloading), cancel) {
+        Ok(_) => true,
+        Err(e) if is_cancelled(&e) => {
+            notifier.send(WorkerEvent::Cancelled);
+            false
+        }
+        Err(e) => {
+            notifier.send(WorkerEvent::Failed(format!("{e:#}")));
+            false
+        }
+    }
+}
+
+/// Scarica ed estrae l'encoder Core ML inoltrando l'avanzamento; restituisce `false` in caso
+/// di errore o annullamento (l'evento corrispondente è già stato inviato).
+fn download_encoder_with_progress(
+    package: &coreml::EncoderPackage,
+    dir: &Path,
+    notifier: &Notifier,
+    cancel: &AtomicBool,
+) -> bool {
+    let progress = download_progress(notifier, Phase::DownloadingEncoder);
+    match coreml::download_encoder(package, dir, progress, cancel) {
         Ok(_) => true,
         Err(e) if is_cancelled(&e) => {
             notifier.send(WorkerEvent::Cancelled);

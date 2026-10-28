@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::audio;
 use crate::device::{self, Device, ResolvedDevice};
-use crate::transcriber::{EngineOptions, OpenVinoUse, TranscribeOptions, Transcriber};
+use crate::transcriber::{CoreMlUse, EngineOptions, OpenVinoUse, TranscribeOptions, Transcriber};
 use crate::transcript::Transcript;
 
 /// Avanzamento di una trascrizione.
@@ -42,8 +42,10 @@ pub struct Outcome {
     pub device: ResolvedDevice,
     /// Presente se la scheda video richiesta non è stata usata.
     pub gpu_warning: Option<String>,
-    /// Presente se era richiesto l'encoder OpenVINO.
+    /// Presente se era richiesto OpenVINO.
     pub openvino: Option<OpenVinoUse>,
+    /// Presente se era richiesto l'encoder Core ML (Neural Engine).
+    pub coreml: Option<CoreMlUse>,
 }
 
 /// Esegue decodifica e trascrizione.
@@ -82,6 +84,7 @@ pub fn run(
         device: transcriber.device().clone(),
         gpu_warning: transcriber.gpu_warning().map(str::to_string),
         openvino: transcription.openvino,
+        coreml: transcription.coreml,
     })
 }
 

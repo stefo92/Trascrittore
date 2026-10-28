@@ -56,6 +56,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("AXPopUpButton", "Lingua"),
     ("AXCheckBox", "Usa la scheda video (GPU)"),
     ("AXPopUpButton", "Scheda video"),
+    (NEURAL_ENGINE.0, NEURAL_ENGINE.1),
     ("AXCheckBox", "Traduci in inglese"),
     ("AXCheckBox", "Includi timestamp"),
     ("AXCheckBox", "Modalità rapida (meno precisa)"),
@@ -66,6 +67,18 @@ const EXPECTED: &[(&str, &str)] = &[
     ("AXPopUpButton", "Formato di esportazione"),
     ("AXButton", "Esporta…"),
 ];
+
+/// Casella del Neural Engine, presente solo nelle versioni con Core ML.
+const NEURAL_ENGINE: (&str, &str) = ("AXCheckBox", "Usa il Neural Engine (Core ML)");
+
+/// Controlli attesi in questa versione del programma.
+fn expected() -> Vec<(&'static str, &'static str)> {
+    EXPECTED
+        .iter()
+        .copied()
+        .filter(|c| *c != NEURAL_ENGINE || trascrittore_core::coreml::compiled())
+        .collect()
+}
 
 /// Elemento dell'albero di accessibilità.
 struct Element {
@@ -178,8 +191,8 @@ pub(super) fn verify(ui: &Ui) -> Vec<String> {
     }
     // Ogni controllo atteso è presente, nell'ordine di lettura.
     let mut last = None;
-    for (role, name) in EXPECTED {
-        match elements.iter().position(|e| e.role == *role && e.name == *name) {
+    for (role, name) in expected() {
+        match elements.iter().position(|e| e.role == role && e.name == name) {
             None => problems.push(format!("manca il controllo {role} «{name}»")),
             Some(position) => {
                 if last.is_some_and(|l| position < l) {
@@ -235,10 +248,10 @@ pub(super) fn verify(ui: &Ui) -> Vec<String> {
             break;
         }
     }
-    let expected_order: Vec<&str> = EXPECTED
-        .iter()
+    let expected_order: Vec<&str> = expected()
+        .into_iter()
         .filter(|(role, _)| *role != "AXProgressIndicator")
-        .map(|(_, name)| *name)
+        .map(|(_, name)| name)
         .collect();
     let actual: Vec<&str> =
         order.iter().map(String::as_str).filter(|name| expected_order.contains(name)).collect();

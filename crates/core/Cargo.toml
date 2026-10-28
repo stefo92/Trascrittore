@@ -17,6 +17,9 @@ whisper = ["dep:whisper-rs"]
 vulkan = ["whisper", "whisper-rs/vulkan"]
 cuda = ["whisper", "whisper-rs/cuda"]
 metal = ["whisper", "whisper-rs/metal"]
+# Encoder su Core ML (Neural Engine dei Mac Apple Silicon), con ripiego sull'encoder normale
+# quando manca il modello Core ML (solo su macOS).
+coreml = ["whisper", "whisper-rs/coreml"]
 
 [dependencies]
 anyhow.workspace = true

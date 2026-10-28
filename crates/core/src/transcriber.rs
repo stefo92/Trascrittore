@@ -2,7 +2,7 @@
 
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 
 use anyhow::{anyhow, bail, Result};
@@ -49,12 +49,23 @@ pub enum OpenVinoUse {
     Failed { reason: String },
 }
 
+/// Esito dell'uso dell'encoder Core ML (Neural Engine dei Mac Apple Silicon).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreMlUse {
+    /// L'encoder è stato eseguito con Core ML.
+    Active,
+    /// Core ML non si è attivato: è stato usato l'encoder normale.
+    Failed { reason: String },
+}
+
 /// Risultato di [`Transcriber::transcribe`].
 #[derive(Debug, Clone)]
 pub struct Transcription {
     pub transcript: Transcript,
     /// Presente se era richiesto OpenVINO.
     pub openvino: Option<OpenVinoUse>,
+    /// Presente se era richiesto l'encoder Core ML.
+    pub coreml: Option<CoreMlUse>,
 }
 
 /// Dati della callback chiamata da whisper.cpp prima di ogni blocco dell'encoder.
@@ -79,6 +90,11 @@ pub struct EngineOptions {
     /// RX 6800 XT (Vulkan) rallenta del 30% sulla GPU e del 50% sulla CPU, ma su altre schede
     /// video può accelerare.
     pub flash_attention: bool,
+    /// Encoder su Core ML (Neural Engine) se accanto al modello c'è il suo encoder Core ML
+    /// (vedi [`crate::coreml`]); ignorato nelle versioni senza Core ML. Misurato su Apple M5,
+    /// 3 minuti di audio con large-v3-turbo-q5_0: 10 s invece di 14 s sulla scheda video,
+    /// 12 s invece di 30 s sul processore.
+    pub coreml: bool,
 }
 
 /// Modello Whisper caricato in memoria, riutilizzabile per più trascrizioni.
@@ -91,14 +107,44 @@ pub struct Transcriber {
     effective: ResolvedDevice,
     engine: EngineOptions,
     gpu_warning: Option<String>,
+    /// Presente se era richiesto l'encoder Core ML.
+    coreml: Option<CoreMlUse>,
 }
 
 static LOGGING: Once = Once::new();
 
+/// Modelli Core ML caricati da whisper.cpp e caricamenti non riusciti (dai suoi messaggi).
+static COREML_LOADED: AtomicUsize = AtomicUsize::new(0);
+static COREML_FAILED: AtomicUsize = AtomicUsize::new(0);
+
 /// Scarta i messaggi di whisper.cpp e ggml invece di stamparli su stderr
 /// (senza un backend di log configurato non vengono mostrati da nessuna parte).
 pub fn silence_engine_logs() {
-    LOGGING.call_once(whisper_rs::install_logging_hooks);
+    LOGGING.call_once(|| {
+        whisper_rs::install_logging_hooks();
+        // I messaggi di whisper.cpp passano da qui: dicono se l'encoder Core ML si è caricato,
+        // cosa che l'API non espone.
+        unsafe {
+            whisper_rs::whisper_rs_sys::whisper_log_set(Some(whisper_log), std::ptr::null_mut())
+        };
+    });
+}
+
+unsafe extern "C" fn whisper_log(
+    _level: whisper_rs::whisper_rs_sys::ggml_log_level,
+    text: *const std::os::raw::c_char,
+    _user_data: *mut c_void,
+) {
+    if text.is_null() {
+        return;
+    }
+    let text = std::ffi::CStr::from_ptr(text).to_bytes();
+    let contains = |needle: &[u8]| text.windows(needle.len()).any(|w| w == needle);
+    if contains(b"Core ML model loaded") {
+        COREML_LOADED.fetch_add(1, Ordering::Relaxed);
+    } else if contains(b"failed to load Core ML model") {
+        COREML_FAILED.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Transcriber {
@@ -122,13 +168,46 @@ impl Transcriber {
                 memory_before = crate::device::memory(gpu.index);
             }
         }
-        let context = WhisperContext::new_with_params(model_path, params).map_err(|e| {
+        // whisper.cpp usa da solo l'encoder Core ML che trova accanto al modello. Per non usarlo
+        // il modello viene caricato dalla memoria: senza percorso whisper.cpp non lo cerca.
+        let coreml_encoder = crate::coreml::compiled()
+            .then(|| crate::coreml::find_encoder(model_path))
+            .flatten();
+        let use_coreml = engine.coreml && coreml_encoder.is_some();
+        let loaded = if coreml_encoder.is_some() && !use_coreml {
+            let bytes = std::fs::read(model_path).map_err(|e| {
+                anyhow!("Impossibile leggere il modello «{}»: {e}", model_path.display())
+            })?;
+            WhisperContext::new_from_buffer_with_params(&bytes, params)
+        } else {
+            WhisperContext::new_with_params(model_path, params)
+        };
+        let context = loaded.map_err(|e| {
             anyhow!(
                 "Impossibile caricare il modello «{}» su {}: {e}",
                 model_path.display(),
                 device.label()
             )
         })?;
+
+        // Il primo stato carica l'encoder Core ML: la prima volta macOS lo compila per il
+        // Neural Engine (per large-v3-turbo circa 15 secondi), poi lo tiene in cache. Farlo qui
+        // lo include nella fase di caricamento invece che nella trascrizione.
+        let coreml = if use_coreml {
+            let (loaded_before, failed_before) =
+                (COREML_LOADED.load(Ordering::Relaxed), COREML_FAILED.load(Ordering::Relaxed));
+            let warm_up = context
+                .create_state()
+                .map_err(|e| anyhow!("Impossibile preparare il modello: {e}"))?;
+            drop(warm_up);
+            Some(coreml_outcome(loaded_before, failed_before))
+        } else if engine.coreml && crate::coreml::compiled() {
+            Some(CoreMlUse::Failed {
+                reason: "manca l'encoder Core ML del modello".to_string(),
+            })
+        } else {
+            None
+        };
 
         let mut effective = device.clone();
         let mut gpu_warning = None;
@@ -150,6 +229,7 @@ impl Transcriber {
             effective,
             engine,
             gpu_warning,
+            coreml,
         })
     }
 
@@ -178,6 +258,11 @@ impl Transcriber {
         self.gpu_warning.as_deref()
     }
 
+    /// Uso dell'encoder Core ML, se era richiesto.
+    pub fn coreml(&self) -> Option<&CoreMlUse> {
+        self.coreml.as_ref()
+    }
+
     /// `true` se il modello supporta più lingue (i modelli `.en` solo l'inglese).
     pub fn is_multilingual(&self) -> bool {
         self.context.is_multilingual()
@@ -194,10 +279,17 @@ impl Transcriber {
         progress: impl FnMut(i32) + 'static,
         cancel: Arc<AtomicBool>,
     ) -> Result<Transcription> {
+        let (loaded_before, failed_before) =
+            (COREML_LOADED.load(Ordering::Relaxed), COREML_FAILED.load(Ordering::Relaxed));
         let mut state = self
             .context
             .create_state()
             .map_err(|e| anyhow!("Impossibile preparare il modello: {e}"))?;
+        // Ogni stato ricarica l'encoder Core ML (dalla cache di macOS, quindi in fretta).
+        let coreml = match &self.coreml {
+            Some(CoreMlUse::Active) => Some(coreml_outcome(loaded_before, failed_before)),
+            other => other.clone(),
+        };
 
         let strategy = if options.fast {
             SamplingStrategy::Greedy { best_of: 1 }
@@ -307,7 +399,23 @@ impl Transcriber {
                     / u64::from(crate::audio::WHISPER_SAMPLE_RATE),
             },
             openvino,
+            coreml,
         })
+    }
+}
+
+/// Esito del caricamento dell'encoder Core ML da parte di uno stato appena creato.
+fn coreml_outcome(loaded_before: usize, failed_before: usize) -> CoreMlUse {
+    if COREML_LOADED.load(Ordering::Relaxed) > loaded_before {
+        CoreMlUse::Active
+    } else if COREML_FAILED.load(Ordering::Relaxed) > failed_before {
+        CoreMlUse::Failed {
+            reason: "Core ML non è riuscito a caricare l'encoder".to_string(),
+        }
+    } else {
+        CoreMlUse::Failed {
+            reason: "Core ML non è disponibile".to_string(),
+        }
     }
 }
 

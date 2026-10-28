@@ -31,6 +31,7 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 | RF-03 | Trascrivere con Whisper in locale, scegliendo il modello (tiny, base, small, medium, large-v3-turbo, large-v3 e le loro varianti compresse, la più leggera di 32 MB) o un file modello personalizzato. |
 | RF-03b | Scegliere il dispositivo di calcolo: automatico, processore (CPU) o una specifica scheda video (AMD, NVIDIA, Intel). |
 | RF-03c | Eseguire l'encoder con OpenVINO su acceleratori neurali (NPU) e schede video Intel o sul processore, con installazione del runtime e download degli encoder dal programma. |
+| RF-03d | Sui Mac Apple Silicon eseguire l'encoder con Core ML sul Neural Engine, con download degli encoder dal programma e possibilità di disattivarlo. |
 | RF-04 | Scegliere la lingua del parlato o lasciarla rilevare automaticamente. |
 | RF-05 | Opzione "Traduci in inglese" (funzione nativa di Whisper). |
 | RF-06 | Mostrare l'avanzamento (percentuale e fase: decodifica, caricamento modello, trascrizione). |
@@ -72,6 +73,7 @@ Trascrittore è un'applicazione desktop scritta in Rust che:
 - Opzioni attivabili dall'utente: scheda video sì/no e quale scheda, modalità rapida (decodifica greedy invece della beam search a 5), Flash Attention. Valori predefiniti scelti con misure reali (AMD Radeon RX 6800 XT, 2 minuti di audio): GPU 5 s, modalità rapida 3 s, Flash Attention 7 s (più lenta, quindi disattivata); CPU 1 min 27 s.
 - Verifica dell'uso effettivo della GPU: dopo il caricamento del modello si controlla dalla memoria video libera che i pesi siano sulla scheda; altrimenti l'utente viene avvisato e lo stato riporta il processore.
 - Lo script di build include il supporto Vulkan quando il Vulkan SDK è presente e copia i programmi in `dist\`, così non si avvia per errore una versione solo CPU.
+- Mac Apple Silicon: encoder su Core ML (Neural Engine), attivo per impostazione predefinita. Misure su Apple M5, 3 minuti di audio con large-v3-turbo-q5_0: scheda video 14,3 s → 10,3 s, modalità rapida 11,3 s → 6,8 s, solo processore 30,4 s → 12,3 s; con base-q5_1 la scheda video resta leggermente più veloce (4,2 s contro 4,7 s). La prima esecuzione compila il modello per il Neural Engine (circa 15 s con large-v3-turbo), durante il caricamento.
 - Il modello caricato viene riutilizzato tra trascrizioni successive.
 - Tutte le operazioni lunghe girano su un thread di lavoro: l'interfaccia resta reattiva e lo screen reader non si blocca.
 
@@ -115,6 +117,7 @@ trascrittore/
 | `audio` | Apertura del contenitore, decodifica di tutte le tracce in PCM, mixaggio in mono, ricampionamento a 16 kHz. |
 | `models` | Catalogo dei modelli ufficiali (nome, file, dimensione), cartella modelli, download con avanzamento e annullamento. |
 | `device` | Elenco delle schede video utilizzabili, scelta «Automatico / CPU / GPU n» e sua risoluzione. |
+| `coreml` | Encoder Core ML (Neural Engine): catalogo degli encoder ufficiali con impronta SHA-256, percorso cercato da whisper.cpp, download ed estrazione. |
 | `openvino` | Caricamento dinamico dell'API C di OpenVINO, dispositivi Intel, encoder chiamato da whisper.cpp, installazione del runtime e degli encoder. |
 | `transcriber` | Caricamento del contesto Whisper, parametri (lingua, traduzione, thread), callback di avanzamento e annullamento, raccolta dei segmenti. |
 | `transcript` | Strutture `Segment`/`Transcript`, formattazione dei timestamp, conversione in testo. |
@@ -146,7 +149,7 @@ Stesso criterio: su Mac l'accessibilità migliore è quella dei controlli di App
 
 | Ambito | Crate | Motivo |
 |---|---|---|
-| Motore di trascrizione | `whisper-rs` 0.16 (whisper.cpp) | Whisper locale, veloce su CPU, GPU opzionale, modelli GGML. |
+| Motore di trascrizione | `whisper-rs` 0.16 (whisper.cpp) | Whisper locale, veloce su CPU, GPU opzionale, modelli GGML; su Mac feature `metal` e `coreml` (Neural Engine, con ripiego sull'encoder normale). |
 | Decodifica audio | `symphonia` 0.6 | Puro Rust, nessuna dipendenza da FFmpeg, formati comuni. |
 | Ricampionamento | `rubato` 5 | Ricampionamento di qualità (sinc/FFT) a 16 kHz. |
 | PDF | `krilla` 0.8 | Unico crate Rust maturo con **PDF taggati e validazione PDF/UA-1**; incorpora i caratteri. |
@@ -221,7 +224,7 @@ Stessa disposizione di §7.1 (senza OpenVINO, che serve solo per gli accelerator
 | Comando+1…5 | Vai a file audio, modello, lingua, testo, formato |
 | Comando+? / F1 | Guida rapida |
 
-Le regole di §7.3 valgono anche qui; il testo non esportato è segnalato dal pallino nel pulsante di chiusura della finestra (`documentEdited`).
+Nel gruppo delle prestazioni, dopo «Scheda video», c'è la casella «Usa il Neural Engine (Core ML)». Le regole di §7.3 valgono anche qui; il testo non esportato è segnalato dal pallino nel pulsante di chiusura della finestra (`documentEdited`).
 
 ## 8. Formati di esportazione
 
@@ -242,6 +245,7 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 - Catalogo: tiny-q5_1 (32 MB, il più leggero), tiny (78 MB), base-q5_1 (60 MB), base (148 MB), small-q5_1 (190 MB), small (488 MB), medium-q5_0 (539 MB), medium (1,5 GB), large-v3-turbo-q5_0 (574 MB, **predefinito**: ottimo compromesso qualità/velocità), large-v3-turbo (1,6 GB), large-v3 (3,1 GB).
 - Sorgente: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-<nome>.bin`.
 - È sempre possibile scegliere un file `.bin` personalizzato.
+- Mac: encoder Core ML per famiglia (`ggml-<famiglia>-encoder.mlmodelc`, dallo stesso repository, in zip con impronta SHA-256): tiny 15 MB, base 38 MB, small 163 MB, medium 568 MB, large-v3 e large-v3-turbo circa 1,2 GB. Valgono anche per le varianti compresse e vengono estratti accanto al modello.
 
 ## 10. Gestione degli errori
 
@@ -292,4 +296,5 @@ Il documento esportato contiene ciò che si vede nel campo di testo, incluse le 
 | Annullamento lento | whisper.cpp controlla l'interruzione solo tra un blocco di codifica e l'altro: la GUI spiega l'attesa invece di sembrare bloccata. |
 | Bug di `set_abort_callback_safe` in whisper-rs 0.16.0 | Callback di interruzione impostata con l'API di basso livello e un trampolino proprio. |
 | Uscita dalla GUI per Mac con il modello caricato su Metal | I distruttori globali di ggml-metal si interrompono se trovano buffer ancora allocati: il modello viene liberato prima dell'uscita (o, se una trascrizione sta finendo, si esce senza distruttori). |
+| Compilazione per il Neural Engine | La prima esecuzione con Core ML (e la prima dopo un aggiornamento) richiede alcuni secondi in più: avviene durante il caricamento del modello e viene annunciata. macOS tiene un piccolo indice della cache in `~/Library/Caches/<programma>`, anche in modalità portable (documentato). |
 | File audio molto lunghi (memoria) | ~230 MB per un'ora di audio: accettabile; elaborazione a blocchi in fase futura. |
