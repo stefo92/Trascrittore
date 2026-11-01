@@ -5,6 +5,11 @@
 //! `dati` accanto all'eseguibile, così il programma si può usare da una chiavetta USB senza
 //! lasciare file sul computer. La modalità si attiva se accanto all'eseguibile c'è la cartella
 //! `dati` oppure il file `portable.txt` (in questo caso `dati` viene creata quando serve).
+//!
+//! Su macOS l'interfaccia grafica è un pacchetto `Trascrittore.app`, con l'eseguibile in
+//! `Trascrittore.app/Contents/MacOS`: la cartella del programma è quella che contiene il
+//! pacchetto, così GUI e CLI condividono la stessa cartella `dati` e il pacchetto firmato non
+//! viene modificato.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -25,9 +30,22 @@ pub fn portable_data_dir() -> Option<&'static Path> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         let exe = std::env::current_exe().ok()?;
-        portable_data_dir_in(exe.parent()?)
+        portable_data_dir_in(program_dir(exe.parent()?))
     })
     .as_deref()
+}
+
+/// Cartella del programma per un eseguibile che si trova in `exe_dir`: la cartella stessa
+/// oppure, dentro un pacchetto macOS (`Nome.app/Contents/MacOS`), quella che contiene il
+/// pacchetto.
+pub fn program_dir(exe_dir: &Path) -> &Path {
+    let bundle = exe_dir
+        .parent()
+        .filter(|_| exe_dir.file_name().is_some_and(|n| n == "MacOS"))
+        .filter(|contents| contents.file_name().is_some_and(|n| n == "Contents"))
+        .and_then(Path::parent)
+        .filter(|app| app.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")));
+    bundle.and_then(Path::parent).unwrap_or(exe_dir)
 }
 
 /// Cartella dei dati portable per un programma che si trova in `exe_dir`, se in quella
@@ -110,6 +128,17 @@ mod tests {
         assert_eq!(data, dir.path().join("dati"));
         // La cartella non viene creata dal solo rilevamento.
         assert!(!data.exists());
+    }
+
+    #[test]
+    fn app_bundle_uses_folder_containing_it() {
+        let folder = Path::new("/Volumes/USB/Trascrittore");
+        let exe_dir = folder.join("Trascrittore.app").join("Contents").join("MacOS");
+        assert_eq!(program_dir(&exe_dir), folder);
+        // Fuori da un pacchetto .app la cartella del programma è quella dell'eseguibile.
+        assert_eq!(program_dir(folder), folder);
+        let not_bundle = folder.join("Altro").join("Contents").join("MacOS");
+        assert_eq!(program_dir(&not_bundle), not_bundle);
     }
 
     #[test]

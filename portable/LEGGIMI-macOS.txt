@@ -2,20 +2,21 @@ Trascrittore per Mac, versione portable
 
 Trascrittore trascrive file audio in testo direttamente sul tuo Mac, con Whisper, ed esporta la trascrizione in TXT, HTML, PDF e DOCX. L'audio non viene mai inviato in rete.
 
-Sul Mac Trascrittore si usa dal Terminale, che funziona con VoiceOver: l'interfaccia grafica per ora esiste solo per Windows. L'avanzamento viene stampato su righe separate, così VoiceOver lo legge senza confusione.
+Trascrittore ha un'interfaccia grafica, Trascrittore.app, fatta di controlli standard del Mac: VoiceOver legge il nome, il tipo e lo stato di ogni controllo, annuncia da solo l'avanzamento del lavoro e tutto si usa anche solo con la tastiera. Per chi preferisce il Terminale c'è anche trascrittore-cli, con le stesse funzioni.
 
 Questa versione non va installata. Puoi copiare la cartella su una chiavetta USB, su un disco esterno o in qualsiasi cartella del Mac e usarla da lì.
 
 
 Requisiti
 
-Un Mac con processore Apple Silicon (M1 o successivo) e macOS 13 Ventura o successivo. La trascrizione usa la scheda video del Mac tramite Metal, che è già inclusa in macOS: non serve installare altro.
+Un Mac con processore Apple Silicon (M1 o successivo) e macOS 13 Ventura o successivo. La trascrizione usa la scheda video del Mac tramite Metal e il Neural Engine tramite Core ML, già inclusi in macOS: non serve installare altro.
 
 
 Contenuto della cartella
 
-trascrittore-cli: il programma.
-dati: la cartella con le impostazioni e, nella sottocartella modelli, i modelli di trascrizione.
+Trascrittore.app: il programma con l'interfaccia grafica.
+trascrittore-cli: il programma da usare nel Terminale.
+dati: la cartella con le impostazioni e, nella sottocartella modelli, i modelli di trascrizione. La usano entrambi i programmi.
 portable.txt: attiva la modalità portable. Non eliminarlo.
 LEGGIMI.txt: questo file.
 LICENZA.txt: il testo della licenza GNU General Public License versione 3, in inglese.
@@ -23,26 +24,51 @@ LICENZA.txt: il testo della licenza GNU General Public License versione 3, in in
 
 Primo avvio
 
-Trascrittore non è autenticato da Apple, quindi macOS blocca il programma se la cartella è stata scaricata da Internet. Prima del primo uso:
+Trascrittore non è autenticato da Apple, quindi macOS blocca i programmi se la cartella è stata scaricata da Internet. Inoltre, finché il blocco resta, macOS avvierebbe Trascrittore.app da una posizione temporanea, dove il programma non trova la sua cartella dati. Prima del primo uso:
 
 1. Nel Finder seleziona la cartella di Trascrittore e premi Comando+Opzione+C per copiarne il percorso.
 2. Apri il Terminale (cartella Applicazioni, poi Utility, poi Terminale).
 3. Scrivi cd seguito da uno spazio, incolla il percorso con Comando+V e premi Invio.
-4. Sblocca il programma con questo comando (il punto finale indica la cartella corrente):
+4. Sblocca i programmi con questo comando (il punto finale indica la cartella corrente):
    xattr -dr com.apple.quarantine .
-5. Controlla che funzioni:
-   ./trascrittore-cli dispositivi
+5. Apri Trascrittore.app: nel Finder selezionalo e premi Comando+O, oppure fai doppio clic.
 
 Se la cartella non è stata scaricata da Internet (ad esempio è stata copiata da una chiavetta) il passo 4 non serve, ma non fa danni.
 
 
-Trascrivere un file
+Usare Trascrittore.app
+
+1. Premi Comando+O (oppure il pulsante Scegli) e scegli un file audio: MP3, WAV, M4A, FLAC, OGG, AIFF e altri. Puoi anche trascinare il file sull'icona di Trascrittore nel Dock, oppure nel Finder usare Apri con, Trascrittore.
+2. Scegli il Modello e la Lingua. Il modello consigliato è Large v3 Turbo compresso; i modelli più piccoli sono più veloci ma meno precisi. Se il modello non è ancora sul Mac, Trascrittore chiede se scaricarlo e ne dice la dimensione.
+3. Premi Comando+R per avviare la trascrizione. VoiceOver annuncia le fasi e l'avanzamento ogni 25 per cento, senza spostare il cursore; Comando+L ripete lo stato quando vuoi. Esc interrompe.
+4. Al termine il cursore si sposta sul Testo trascritto, che puoi leggere con le frecce e correggere.
+5. Scegli il Formato di esportazione e premi Comando+S. Nella finestra Esporta puoi cambiare anche il formato.
+
+L'opzione Usa la scheda video è attiva: la trascrizione è molto più veloce che con il solo processore. Anche Usa il Neural Engine è attiva: la parte più pesante del calcolo viene eseguita dal Neural Engine del Mac, e con il modello consigliato la trascrizione è circa un terzo più veloce. Per ogni modello serve un file aggiuntivo, l'encoder Core ML: alla prima trascrizione Trascrittore chiede se scaricarlo e ne dice la dimensione (circa 1,2 GB per il modello consigliato, 15 MB per il più leggero); puoi anche scegliere Trascrivi senza. La prima volta, e dopo ogni aggiornamento di Trascrittore, macOS prepara il modello per il Neural Engine e il caricamento dura qualche secondo in più. Modalità rapida accelera ancora, con qualche errore in più. Traduci in inglese traduce il parlato invece di trascriverlo. Includi timestamp aggiunge il momento dell'audio all'inizio di ogni frase.
+
+Tasti rapidi:
+Comando+O: apri un file audio.
+Comando+R oppure F5: avvia la trascrizione.
+Esc oppure Comando+punto: interrompi l'operazione in corso.
+Comando+S: esporta.
+Comando+Maiuscole+C: copia tutto il testo trascritto.
+Comando+L oppure F2: leggi lo stato.
+Comando+più, Comando+meno, Comando+0: ingrandisci, riduci o riporta alla dimensione normale il testo trascritto.
+Comando+1: vai al file audio. Comando+2: al modello. Comando+3: alla lingua. Comando+4: al testo trascritto. Comando+5: al formato di esportazione.
+Comando+punto interrogativo oppure F1: guida rapida.
+
+Con VoiceOver ti sposti tra i controlli con Tab oppure con VO+freccia destra e sinistra. Senza VoiceOver il tasto Tab raggiunge pulsanti, caselle e menu a comparsa solo se è attiva Navigazione da tastiera, in Impostazioni di Sistema, Tastiera. Nel testo trascritto Tab passa al controllo successivo invece di inserire una tabulazione.
+
+Il pallino nel pulsante di chiusura della finestra indica che il testo non è ancora stato esportato: prima di uscire o di iniziare una nuova trascrizione Trascrittore chiede conferma.
+
+
+Trascrivere dal Terminale
 
 Dal Terminale, nella cartella di Trascrittore:
 
 ./trascrittore-cli trascrivi ~/Documents/intervista.m4a --lingua it --formato docx,pdf --scarica-modello
 
-La prima volta l'opzione --scarica-modello scarica il modello di trascrizione consigliato, che occupa 574 MB; le volte successive viene usato quello già scaricato. La trascrizione viene salvata accanto al file audio; con --uscita puoi scegliere un'altra cartella.
+La prima volta l'opzione --scarica-modello scarica il modello di trascrizione consigliato, che occupa 574 MB, e il suo encoder per il Neural Engine, circa 1,2 GB; le volte successive vengono usati quelli già scaricati. La trascrizione viene salvata accanto al file audio; con --uscita puoi scegliere un'altra cartella. L'avanzamento viene stampato su righe separate, così VoiceOver lo legge senza confusione.
 
 Altri comandi utili:
 
@@ -52,8 +78,8 @@ elenca il processore e la scheda video utilizzabili.
 ./trascrittore-cli modelli
 elenca i modelli disponibili e quelli già scaricati.
 
-./trascrittore-cli trascrivi riunione.mp3 --dispositivo cpu
-usa solo il processore.
+./trascrittore-cli trascrivi riunione.mp3 --dispositivo cpu --senza-neural-engine
+usa solo il processore, senza la scheda video e senza il Neural Engine.
 
 ./trascrittore-cli --help
 mostra tutte le opzioni.
@@ -61,19 +87,21 @@ mostra tutte le opzioni.
 
 Dove vengono salvati i dati
 
-Impostazioni e modelli restano nella cartella dati, accanto al programma: Trascrittore non scrive nulla nella Libreria dell'utente del Mac che stai usando.
+Impostazioni e modelli restano nella cartella dati, accanto ai programmi: Trascrittore non scrive file propri nella Libreria dell'utente del Mac che stai usando. macOS può però ricordare, nelle preferenze del sistema, la cartella e la dimensione delle finestre Apri ed Esporta.
 
 I modelli sono file grandi: assicurati che sulla chiavetta ci sia spazio sufficiente. Per evitare il download puoi copiare un modello già scaricato (un file come ggml-large-v3-turbo-q5_0.bin, lo stesso usato dalla versione per Windows) nella cartella dati/modelli.
 
-macOS può conservare nella propria cartella temporanea una cache degli shader Metal usati dalla scheda video: è un comportamento di macOS, non di Trascrittore.
+Gli encoder per il Neural Engine sono cartelle con nomi come ggml-large-v3-turbo-encoder.mlmodelc, accanto ai modelli in dati/modelli: anche queste si possono copiare da un altro computer.
+
+macOS può conservare nella propria cartella temporanea una cache degli shader Metal usati dalla scheda video e, nella cartella Caches della Libreria, un piccolo indice dei modelli preparati per il Neural Engine: è un comportamento di macOS, non di Trascrittore.
 
 
 Licenze
 
 Copyright (C) 2026 nvrscurano
 
-Trascrittore è software libero: puoi ridistribuirlo e modificarlo secondo i termini della GNU General Public License versione 3, pubblicata dalla Free Software Foundation. Il testo della licenza è nel file LICENZA.txt e all'indirizzo https://www.gnu.org/licenses/gpl-3.0.html. Trascrittore è distribuito senza alcuna garanzia, neppure quella implicita di commerciabilità o di idoneità a un particolare scopo.
+Trascrittore è software libero: puoi ridistribuirlo e modificarlo secondo i termini della GNU General Public License versione 3, pubblicata dalla Free Software Foundation. Il testo della licenza è nel file LICENZA.txt e all'indirizzo https://www.gnu.org/licenses/gpl-3.0.html. Trascrittore è distribuito senza alcuna garanzia, neppure quella implicita di commerciabilità o di idoneità a un particolare scopo. La finestra Informazioni su Trascrittore, nel menu Trascrittore, mostra gli stessi avvisi.
 
 Include whisper.cpp e ggml, con licenza MIT: Copyright (c) 2023-2024 The ggml authors. Il testo della licenza MIT è disponibile all'indirizzo https://opensource.org/license/mit.
 
-Metal, Accelerate e le altre librerie usate fanno parte di macOS e non sono incluse nel programma.
+Metal, Accelerate, AppKit e le altre librerie usate fanno parte di macOS e non sono incluse nel programma.

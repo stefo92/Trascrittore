@@ -30,6 +30,8 @@ pub struct Settings {
     pub fast_mode: bool,
     /// Dispositivo OpenVINO per l'encoder (es. `NPU`); `None` = non usare OpenVINO.
     pub openvino_device: Option<String>,
+    /// Encoder su Core ML (Neural Engine dei Mac Apple Silicon), dove è disponibile.
+    pub neural_engine: bool,
     pub export_format: ExportFormat,
     pub last_audio_dir: Option<PathBuf>,
     pub last_export_dir: Option<PathBuf>,
@@ -49,6 +51,7 @@ impl Default for Settings {
             flash_attention: false,
             fast_mode: false,
             openvino_device: None,
+            neural_engine: true,
             export_format: ExportFormat::Docx,
             last_audio_dir: None,
             last_export_dir: None,

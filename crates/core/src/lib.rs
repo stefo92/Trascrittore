@@ -4,6 +4,7 @@
 //! Il nucleo non dipende da alcuna interfaccia grafica: è usato sia dalla CLI sia dalla GUI.
 
 pub mod audio;
+pub mod coreml;
 pub mod device;
 pub mod document;
 pub mod export;

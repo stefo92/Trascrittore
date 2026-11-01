@@ -1413,6 +1413,8 @@ impl App {
             device: self.selected_device(),
             engine: EngineOptions {
                 flash_attention: self.settings.borrow().flash_attention,
+                // Core ML esiste solo su macOS.
+                coreml: false,
             },
             options,
         };
@@ -1918,6 +1920,7 @@ impl App {
             device,
             gpu_warning,
             openvino,
+            coreml: _,
         } = outcome;
         let elapsed = self
             .started
